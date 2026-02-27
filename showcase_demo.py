@@ -237,11 +237,11 @@ async def demo_scenario_3_restricted_ticker(client: httpx.AsyncClient):
 async def demo_scenario_4_loop_detection(client: httpx.AsyncClient):
     """Scenario 4: Agent stuck in a loop."""
     section("SCENARIO 4: Loop Detection — Circuit Breaker")
-    print(f"  {DIM}Expected: First 2 PROCEED, third HALT (loop detected){RESET}\n")
+    print(f"  {DIM}Expected: First 3 PROCEED, fourth HALT (loop detected){RESET}\n")
 
     agent = DemoAgent("demo-loop-001", "StuckBot")
 
-    for i in range(3):
+    for i in range(4):
         decision = await agent.send_step(
             client,
             thought=f"Let me check TSLA price again (attempt {i+1})",
