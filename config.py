@@ -3,24 +3,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Fastino / GLiNER
+FASTINO_API_KEY = os.getenv("FASTINO_API_KEY", "")
+FASTINO_API_URL = os.getenv("FASTINO_API_URL", "https://api.pioneer.ai/gliner-2")
+
+# Senso
+SENSO_API_KEY = os.getenv("SENSO_API_KEY", "")
+SENSO_API_URL = os.getenv("SENSO_API_URL", "https://apiv2.senso.ai/api/v1/org/search")
+
+# Modulate (SDK-based - may need fallback)
+MODULATE_API_KEY = os.getenv("MODULATE_API_KEY", "")
+MODULATE_API_URL = os.getenv("MODULATE_API_URL", "")
+
 # Neo4j
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "password")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
-# Fastino GLiNER
-FASTINO_API_URL = os.getenv("FASTINO_API_URL", "")
-FASTINO_API_KEY = os.getenv("FASTINO_API_KEY", "")
-
-# Senso
-SENSO_API_URL = os.getenv("SENSO_API_URL", "")
-SENSO_API_KEY = os.getenv("SENSO_API_KEY", "")
-
-# Modulate
-MODULATE_API_URL = os.getenv("MODULATE_API_URL", "")
-MODULATE_API_KEY = os.getenv("MODULATE_API_KEY", "")
-
-# AgentWatch
-AGENTWATCH_HOST = os.getenv("AGENTWATCH_HOST", "http://localhost:8000")
-LOOP_THRESHOLD = int(os.getenv("LOOP_THRESHOLD", "3"))
-LOOP_WINDOW = int(os.getenv("LOOP_WINDOW", "5"))
+# Anthropic
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
