@@ -5,7 +5,7 @@ Pipeline order (fail-closed):
   1. Loop detection  (Person 2 — called from main.py before this module)
   2. extract_entities()   — Fastino GLiNER
   3. check_policy()       — Senso
-  4. check_safety()       — Modulate / keyword fallback
+  4. check_safety()       — Text safety filter (future: Modulate ToxMod for voice)
   5. PROCEED if all pass, HALT on first failure
 """
 
@@ -281,8 +281,8 @@ def _mock_policy_check(entities: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 3. Safety Check  (Modulate — keyword-based)
-# Note: Modulate is SDK-only (no REST API); using keyword pattern matching
+# 3. Safety Check  (Keyword-based text safety filter)
+# Future: Integrate Modulate ToxMod for voice agent safety
 # ─────────────────────────────────────────────
 
 _TOXIC_PATTERNS = re.compile(
@@ -299,7 +299,7 @@ _URGENCY_PATTERN = re.compile(
 async def check_safety(thought: str) -> dict:
     """
     Analyze agent thought for safety violations via keyword pattern matching.
-    Modulate is SDK-only — this covers the text safety layer.
+    Detects toxic language, manipulation, and coercion patterns.
 
     Returns: {"safe": bool, "flags": list[str]}
     """
@@ -316,7 +316,7 @@ def _keyword_safety_check(thought: str) -> dict:
     result = {"safe": len(flags) == 0, "flags": flags}
     label = "SAFE" if result["safe"] else f"VIOLATION — {flags}"
     color = _CYAN if result["safe"] else _YELLOW
-    _log("🛡️", "Modulate", f"Safety check: {label}", color)
+    _log("🛡️", "Safety", f"Check: {label}", color)
     return result
 
 
@@ -330,9 +330,9 @@ async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
 
     Pipeline (fail-closed — first HALT wins):
       1. Loop detection   — handled upstream in main.py (Person 2)
-      2. extract_entities — Fastino
+      2. extract_entities — Fastino GLiNER
       3. check_policy     — Senso
-      4. check_safety     — Modulate
+      4. check_safety     — Text safety filter
 
     Returns a GovernanceDecision.
     """
@@ -407,7 +407,7 @@ async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
         return _halt(
             "SAFETY_VIOLATION",
             f"Safety check error: {exc}",
-            "modulate_safety_check",
+            "safety_check",
         )
 
     if not safety_result.get("safe", True):
@@ -415,7 +415,7 @@ async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
         return _halt(
             "SAFETY_VIOLATION",
             f"Safety flags detected: {', '.join(flags)}",
-            "modulate_safety_check",
+            "safety_check",
         )
 
     return _proceed()
