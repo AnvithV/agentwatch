@@ -22,3 +22,6 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
 # Anthropic
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+# AgentWatch Server
+AGENTWATCH_HOST = os.getenv("AGENTWATCH_HOST", "http://localhost:8000")
