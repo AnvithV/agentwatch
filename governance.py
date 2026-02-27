@@ -154,8 +154,8 @@ async def _senso_policy_check(entities: dict, agent_id: str) -> dict:
     has_price = entities.get("price") is not None
     has_quantity = entities.get("quantity") is not None
     has_ticker = entities.get("ticker") is not None
-    # Require a trade action AND at least one concrete data point (price, quantity, or ticker)
-    if not (is_trade_action and (has_price or has_quantity or has_ticker)):
+    # Require a trade action AND concrete financial data (price or quantity)
+    if not (is_trade_action and (has_price or has_quantity)):
         return {"compliant": True, "violation": None, "policy_limit": None}
 
     # Build a focused compliance query
