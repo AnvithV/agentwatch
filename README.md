@@ -1,58 +1,158 @@
 # AgentWatch
 
-**Observability & Governance PaaS for Autonomous AI Agents**
+**Autonomous Governance PaaS for AI Agents**
 
-AgentWatch is a middleware platform designed to provide visibility and control over autonomous AI agents. It acts as a "Mission Control," collecting real-time telemetry from agents, running automated "Jury" evaluations, and providing a "Human-in-the-Loop" voting system to prevent hallucinations and loops.
+AgentWatch is a PaaS middleware that acts as "Mission Control" for autonomous AI agents. It intercepts agent actions in real-time, evaluates them against business policies, and autonomously halts dangerous or costly operations — no human intervention required.
 
-## Target Audience
+## Problem
 
-- **AI Engineers** — Debug complex agentic traces.
-- **Operations Managers** — Monitor costs and success rates of automated workflows.
-- **Compliance Officers** — Audit every action an agent took and why.
+Autonomous agents in production lack safety guardrails:
+
+- **Token Drainage** — Infinite loops burning thousands of dollars
+- **Policy Violations** — Unauthorized actions (e.g., spending over budget)
+- **Hallucinations** — Operating on false information, causing brand damage
+
+## Architecture
+
+```
+Agent SDK                AgentWatch                    Sponsor APIs
+   |                         |                              |
+   |--- Telemetry Event ---->|                              |
+   |                         |--- raw_log -----> Fastino GLiNER (entity extraction)
+   |                         |<-- {price, ticker, action} --|
+   |                         |                              |
+   |                         |--- entities ----> Senso (policy check)
+   |                         |<-- compliant? ---------------|
+   |                         |                              |
+   |                         |--- thought -----> Modulate (safety check)
+   |                         |<-- safe? --------------------|
+   |                         |                              |
+   |                         |--- step --------> Neo4j (loop detection + audit)
+   |                         |<-- loop? --------------------|
+   |                         |                              |
+   |<-- HALT / PROCEED ------|                              |
+```
 
 ## Core Features
 
-### 1. Real-Time Trace Collection (The Observer)
+### 1. Real-Time Telemetry Ingestion
 
-Ingest JSON-based "Step Updates" from agents — Thinking, Planning, Tool Use, and Observation — and visualize them as a vertical **Reasoning Tree** showing the hierarchy of agent thoughts.
+Accepts JSON telemetry events from any agent SDK:
 
-### 2. The Agent Jury (Automated Evaluation)
+```json
+{
+  "agent_id": "agent-001",
+  "step_id": "uuid",
+  "timestamp": "2026-02-27T11:45:00Z",
+  "thought": "I should look up the latest revenue figures for AAPL",
+  "tool_used": "tavily_search",
+  "input_parameters": {"query": "AAPL Q4 2025 revenue"},
+  "observation": "Apple reported $94.9B in Q4 2025 revenue...",
+  "raw_log": "Agent decided to BUY 500 shares of AAPL at $242.50, total cost $121,250"
+}
+```
 
-For every step an agent takes, a secondary "Judge Agent" (e.g., GPT-4o-mini) votes on:
+### 2. In-Flight Governance Pipeline
 
-- **Hallucination Check** — Does the output match the tool data?
-- **Safety Check** — Is the agent attempting a restricted action?
+Every agent action passes through an autonomous decision pipeline:
 
-If the Jury votes **"Fail,"** the agent is automatically paused.
+1. **Fastino GLiNER** — Extracts structured entities (price, ticker, action) from raw logs
+2. **Senso Policy Check** — Compares entities against live business policies (budget limits, restricted tickers)
+3. **Modulate Safety Check** — Analyzes agent output for manipulative or unsafe language
+4. **Circuit Breaker** — Neo4j detects if the agent is repeating the same action 3+ times (loop kill)
 
-### 3. Human-in-the-Loop (The Voting UI)
+Pipeline is **fail-closed**: if any check errors out, the default decision is HALT.
 
-A dashboard where high-stakes actions are queued as "Pending" for human review:
+### 3. Neo4j Reasoning Trace Auditing
 
-- **Approve** — Agent proceeds to the next step.
-- **Reject** — Agent process is killed.
-- **Feedback** — Human provides text guidance for the agent to retry.
+Every reasoning step is stored as a graph node in Neo4j, enabling:
+- Full reasoning chain visualization
+- Loop detection via Cypher queries
+- Audit trail of every decision and why it was made
 
-### 4. The Circuit Breaker
+### 4. Governance Decision Output
 
-If an agent repeats the same tool call with the same parameters **3 times in a row**, the system triggers an automatic **Loop Kill** to save token costs.
+```json
+{
+  "agent_id": "agent-001",
+  "step_id": "uuid",
+  "decision": "HALT",
+  "reason": "POLICY_VIOLATION",
+  "details": "Extracted cost $121,250 exceeds budget limit $100,000",
+  "triggered_by": "senso_policy_check",
+  "timestamp": "2026-02-27T11:45:01Z"
+}
+```
 
-## UI Design
+## Sponsor Integrations
 
-- **Global Health View** — Bird's-eye view of all running agents with status lights:
-  - Green: Active
-  - Yellow: Pending Vote
-  - Red: Halted / Looping
-- **NOC Dashboard** — Real-time graphs showing Token Spend vs. Task Completion.
+| Sponsor | Role | Integration |
+|---------|------|-------------|
+| **Fastino (GLiNER)** | Entity extraction | Parses raw agent logs into structured JSON (price, ticker, action) |
+| **Senso.ai** | Policy enforcement | Checks extracted entities against live business rules |
+| **Neo4j** | Reasoning graph + loop detection | Stores agent steps as graph nodes; Cypher queries detect loops |
+| **Modulate** | Safety compliance | Analyzes agent text output for manipulative/unsafe language |
 
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | FastAPI or Node.js |
-| Database | Supabase (PostgreSQL) |
-| AI Layer | LangGraph + OpenAI / Anthropic APIs |
-| Frontend | Next.js + Tailwind CSS + ShadcnUI |
+| Backend | FastAPI (async, low-latency) |
+| Database | Neo4j (reasoning graphs) + PostgreSQL (policy storage) |
+| AI Layer | Anthropic Claude (Judge Agent) + Fastino GLiNER (extraction) |
+| Demo Agent | Python + httpx |
+
+## Project Structure
+
+```
+agentwatch/
+├── main.py              # FastAPI app + endpoints
+├── governance.py         # Governance pipeline (Fastino, Senso, Modulate)
+├── neo4j_driver.py       # Neo4j operations + loop detection
+├── demo_agent.py         # Simulated agent for demo scenarios
+├── models.py             # Shared Pydantic models
+├── config.py             # API keys, Neo4j creds, env vars
+├── requirements.txt
+├── .env.example
+└── README.md
+```
+
+## Quick Start
+
+```bash
+# Clone and setup
+git clone https://github.com/AnvithV/agentwatch.git
+cd agentwatch
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Configure (copy and fill in API keys)
+cp .env.example .env
+
+# Start the server
+uvicorn main:app --reload
+
+# In another terminal, run the demo
+python3 demo_agent.py
+```
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/health` | Health check |
+| `POST` | `/api/v1/telemetry` | Submit agent telemetry for governance evaluation |
+| `GET` | `/api/v1/agent/{agent_id}/graph` | Get reasoning graph for an agent |
+
+## Demo Scenarios
+
+The demo agent (`demo_agent.py`) runs 4 scenarios:
+
+1. **Happy Path** — Agent researches stocks, stays within policy → PROCEED
+2. **Policy Violation** — Agent tries to buy $121,250 of AAPL (budget is $100,000) → HALT
+3. **Loop Detection** — Agent searches for TSLA price 3 times in a row → HALT
+4. **Safety Violation** — Agent generates manipulative investment advice → HALT
 
 ## Success Metrics
 
@@ -64,6 +164,6 @@ If an agent repeats the same tool call with the same parameters **3 times in a r
 
 ## The Pitch
 
-> We don't just log data; we use a separate LLM to act as a "Police Officer" for the primary agent.
+> We don't just log agent data — we use a separate governance pipeline to act as an autonomous "Police Officer" for the primary agent, halting dangerous actions before they execute.
 
-AgentWatch isn't another logging tool — it's an **Agent Jury** system. The value innovation is using a secondary model to evaluate every step of the primary agent in real time, combining automated governance with human oversight to build **trust** and **reliability** into agentic workflows.
+AgentWatch is **not** another observability dashboard. It's an **autonomous governance layer** that intercepts, evaluates, and controls agent behavior in real-time using sponsor APIs (Fastino, Senso, Neo4j, Modulate) — turning unreliable agents into trustworthy production systems.
