@@ -1,13 +1,57 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from typing import Optional
 
 import aiohttp
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 import config
 from models import TelemetryEvent, GovernanceDecision
 from governance import run_governance_pipeline, extract_entities, check_policy
 from neo4j_driver import log_step, check_for_loops, get_agent_graph
+
+# ---------------------------------------------------------------------------
+# Webhook Registry — stores callback URLs for agents
+# ---------------------------------------------------------------------------
+_webhook_registry: dict[str, str] = {}  # agent_id -> webhook_url
+
+
+class WebhookConfig(BaseModel):
+    agent_id: str
+    webhook_url: str
+
+
+async def _fire_webhook(agent_id: str, decision: GovernanceDecision):
+    """Fire webhook on HALT to actively stop the agent."""
+    webhook_url = _webhook_registry.get(agent_id) or _webhook_registry.get("*")
+    if not webhook_url:
+        return
+
+    payload = {
+        "event": "HALT",
+        "agent_id": agent_id,
+        "step_id": decision.step_id,
+        "reason": decision.reason,
+        "details": decision.details,
+        "triggered_by": decision.triggered_by,
+        "timestamp": decision.timestamp.isoformat(),
+        "action": "STOP_AGENT",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                webhook_url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status < 300:
+                    print(f"[Webhook] Fired HALT to {webhook_url} — {resp.status}")
+                else:
+                    print(f"[Webhook] Failed: {resp.status}")
+    except Exception as e:
+        print(f"[Webhook] Error: {e}")
 
 TRADING_POLICIES = """
 AgentWatch Trading Policy Document
@@ -117,6 +161,10 @@ async def receive_telemetry(event: TelemetryEvent):
     # 4. Update the step with the final decision
     await log_step(telemetry, decision.model_dump())
 
+    # 5. Fire webhook if HALT (active circuit breaker)
+    if decision.decision == "HALT":
+        await _fire_webhook(event.agent_id, decision)
+
     return decision
 
 
@@ -146,3 +194,67 @@ async def get_agent_halts(agent_id: str):
     from neo4j_driver import get_halted_steps
     halts = await get_halted_steps(agent_id)
     return {"agent_id": agent_id, "halts": halts, "count": len(halts)}
+
+
+# ---------------------------------------------------------------------------
+# Webhook Management — Active Circuit Breaker
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/webhooks")
+async def register_webhook(config: WebhookConfig):
+    """
+    Register a webhook URL for an agent.
+    When AgentWatch issues a HALT, it will POST to this URL.
+    Use agent_id="*" for a global catch-all webhook.
+    """
+    _webhook_registry[config.agent_id] = config.webhook_url
+    return {
+        "status": "registered",
+        "agent_id": config.agent_id,
+        "webhook_url": config.webhook_url,
+    }
+
+
+@app.get("/api/v1/webhooks")
+async def list_webhooks():
+    """List all registered webhooks."""
+    return {"webhooks": _webhook_registry}
+
+
+@app.delete("/api/v1/webhooks/{agent_id}")
+async def delete_webhook(agent_id: str):
+    """Remove a webhook registration."""
+    if agent_id in _webhook_registry:
+        del _webhook_registry[agent_id]
+        return {"status": "deleted", "agent_id": agent_id}
+    return {"status": "not_found", "agent_id": agent_id}
+
+
+# ---------------------------------------------------------------------------
+# Demo Webhook Receiver — Shows the circuit breaker in action
+# ---------------------------------------------------------------------------
+_halt_signals: list[dict] = []  # Store received HALT signals for demo
+
+
+@app.post("/demo/webhook/halt")
+async def demo_webhook_receiver(payload: dict):
+    """
+    Demo endpoint that receives HALT webhooks.
+    In production, this would be your agent's control plane.
+    """
+    print(f"\n{'='*60}")
+    print(f"🚨 HALT SIGNAL RECEIVED")
+    print(f"   Agent: {payload.get('agent_id')}")
+    print(f"   Reason: {payload.get('reason')}")
+    print(f"   Details: {payload.get('details')}")
+    print(f"   Action: {payload.get('action')}")
+    print(f"{'='*60}\n")
+
+    _halt_signals.append(payload)
+    return {"status": "received", "action": "agent_stopped"}
+
+
+@app.get("/demo/webhook/signals")
+async def get_halt_signals():
+    """View all HALT signals received by the demo webhook."""
+    return {"signals": _halt_signals, "count": len(_halt_signals)}
