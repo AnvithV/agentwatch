@@ -1,10 +1,11 @@
+import asyncio
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -27,6 +28,37 @@ _halted_agents: set[str] = set()
 # Recent decisions ring buffer — powers the dashboard live feed
 # ---------------------------------------------------------------------------
 _recent_decisions: deque = deque(maxlen=100)
+
+# ---------------------------------------------------------------------------
+# WebSocket Connection Manager — Real-time updates to dashboard
+# ---------------------------------------------------------------------------
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"[WebSocket] Client connected. Total: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+        print(f"[WebSocket] Client disconnected. Total: {len(self.active_connections)}")
+
+    async def broadcast(self, message: dict):
+        """Broadcast a message to all connected clients."""
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_json(message)
+            except Exception:
+                disconnected.append(connection)
+        # Clean up disconnected clients
+        for conn in disconnected:
+            if conn in self.active_connections:
+                self.active_connections.remove(conn)
+
+ws_manager = ConnectionManager()
 
 
 class WebhookConfig(BaseModel):
@@ -174,7 +206,7 @@ async def receive_telemetry(event: TelemetryEvent):
             triggered_by="dashboard_user",
             timestamp=datetime.now(timezone.utc),
         )
-        _push_recent(event, decision, telemetry)
+        await _push_recent(event, decision, telemetry)
         return decision
 
     # 1. Check for loops FIRST (before logging, so we check previous steps only)
@@ -203,8 +235,8 @@ async def receive_telemetry(event: TelemetryEvent):
     if decision.decision == "HALT":
         await _fire_webhook(event.agent_id, decision)
 
-    # 6. Push to live feed buffer
-    _push_recent(event, decision, telemetry)
+    # 6. Push to live feed buffer and broadcast via WebSocket
+    await _push_recent(event, decision, telemetry)
 
     return decision
 
@@ -215,9 +247,9 @@ async def get_graph(agent_id: str):
     return graph
 
 
-def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry: dict):
-    """Push a decision into the live feed ring buffer."""
-    _recent_decisions.appendleft({
+async def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry: dict):
+    """Push a decision into the live feed ring buffer and broadcast via WebSocket."""
+    decision_data = {
         "id": f"{event.agent_id}-{event.step_id}",
         "agent_id": event.agent_id,
         "step_id": event.step_id,
@@ -231,6 +263,13 @@ def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry:
         "timestamp": decision.timestamp.isoformat(),
         "warnings": getattr(decision, 'warnings', []),
         "severity": getattr(decision, 'severity', 'info'),
+    }
+    _recent_decisions.appendleft(decision_data)
+
+    # Broadcast to all WebSocket clients
+    await ws_manager.broadcast({
+        "type": "decision",
+        "data": decision_data
     })
 
 
@@ -240,10 +279,30 @@ async def get_recent(limit: int = 50):
     return {"decisions": list(_recent_decisions)[:limit]}
 
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time dashboard updates."""
+    await ws_manager.connect(websocket)
+    try:
+        while True:
+            # Keep connection alive, listen for any client messages
+            data = await websocket.receive_text()
+            # Echo back or handle ping/pong
+            if data == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        ws_manager.disconnect(websocket)
+
+
 @app.post("/api/v1/agent/{agent_id}/halt")
 async def halt_agent(agent_id: str):
     """Manually halt an agent via dashboard. All future telemetry will be rejected."""
     _halted_agents.add(agent_id)
+    # Broadcast to dashboard
+    await ws_manager.broadcast({
+        "type": "agent_status",
+        "data": {"agent_id": agent_id, "status": "halted", "halted_agents": list(_halted_agents)}
+    })
     return {"status": "halted", "agent_id": agent_id}
 
 
@@ -251,6 +310,11 @@ async def halt_agent(agent_id: str):
 async def resume_agent(agent_id: str):
     """Resume a manually halted agent."""
     _halted_agents.discard(agent_id)
+    # Broadcast to dashboard
+    await ws_manager.broadcast({
+        "type": "agent_status",
+        "data": {"agent_id": agent_id, "status": "resumed", "halted_agents": list(_halted_agents)}
+    })
     return {"status": "resumed", "agent_id": agent_id}
 
 
@@ -407,6 +471,12 @@ async def update_policies(update: PolicyUpdate):
 
     print(f"[Policy] Updated: {', '.join(changes)}")
 
+    # Broadcast policy update to dashboard
+    await ws_manager.broadcast({
+        "type": "policy_update",
+        "data": {"policies": config.MOCK_POLICIES, "changes": changes}
+    })
+
     return {
         "status": "updated",
         "changes": changes,
@@ -421,6 +491,13 @@ async def reset_policies():
         config.MOCK_POLICIES[key] = value if not isinstance(value, list) else value.copy()
 
     print("[Policy] Reset to defaults")
+
+    # Broadcast policy reset
+    await ws_manager.broadcast({
+        "type": "policy_update",
+        "data": {"policies": config.MOCK_POLICIES, "changes": ["reset to defaults"]}
+    })
+
     return {
         "status": "reset",
         "policies": config.MOCK_POLICIES,
@@ -433,6 +510,11 @@ async def add_restricted_ticker(ticker: str):
     ticker = ticker.upper()
     if ticker not in config.MOCK_POLICIES["restricted_tickers"]:
         config.MOCK_POLICIES["restricted_tickers"].append(ticker)
+        # Broadcast policy update
+        await ws_manager.broadcast({
+            "type": "policy_update",
+            "data": {"policies": config.MOCK_POLICIES, "changes": [f"added {ticker} to restricted"]}
+        })
         return {"status": "added", "ticker": ticker, "restricted_tickers": config.MOCK_POLICIES["restricted_tickers"]}
     return {"status": "already_exists", "ticker": ticker}
 
@@ -443,6 +525,11 @@ async def remove_restricted_ticker(ticker: str):
     ticker = ticker.upper()
     if ticker in config.MOCK_POLICIES["restricted_tickers"]:
         config.MOCK_POLICIES["restricted_tickers"].remove(ticker)
+        # Broadcast policy update
+        await ws_manager.broadcast({
+            "type": "policy_update",
+            "data": {"policies": config.MOCK_POLICIES, "changes": [f"removed {ticker} from restricted"]}
+        })
         return {"status": "removed", "ticker": ticker, "restricted_tickers": config.MOCK_POLICIES["restricted_tickers"]}
     return {"status": "not_found", "ticker": ticker}
 
