@@ -128,7 +128,15 @@ async def _check_senso_connection():
 
 @asynccontextmanager
 async def lifespan(app):
-    # Startup: verify Senso connection and policy availability
+    # Startup: clear old data for fresh demo
+    from neo4j_driver import clear_all_data
+    _recent_decisions.clear()
+    _halted_agents.clear()
+    _halt_signals.clear()
+    await clear_all_data()
+    print("[Startup] All data cleared - ready for fresh demo")
+
+    # Verify Senso connection and policy availability
     await _check_senso_connection()
     yield
 
@@ -169,10 +177,7 @@ async def receive_telemetry(event: TelemetryEvent):
         _push_recent(event, decision, telemetry)
         return decision
 
-    # 1. Pre-log the step so loop detection can see it
-    await log_step(telemetry, {"decision": "PENDING", "reason": "", "triggered_by": ""})
-
-    # 2. Check for loops (fastest check — short-circuit)
+    # 1. Check for loops FIRST (before logging, so we check previous steps only)
     is_loop = await check_for_loops(
         event.agent_id, event.tool_used, event.input_parameters
     )
@@ -188,10 +193,10 @@ async def receive_telemetry(event: TelemetryEvent):
             timestamp=datetime.now(timezone.utc),
         )
     else:
-        # 3. Run full governance pipeline
+        # 2. Run full governance pipeline
         decision = await run_governance_pipeline(telemetry)
 
-    # 4. Update the step with the final decision
+    # 3. Log the step with the final decision (only once!)
     await log_step(telemetry, decision.model_dump())
 
     # 5. Fire webhook if HALT (active circuit breaker)
@@ -224,6 +229,8 @@ def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry:
         "tool_used": telemetry.get("tool_used", ""),
         "raw_log": telemetry.get("raw_log", ""),
         "timestamp": decision.timestamp.isoformat(),
+        "warnings": getattr(decision, 'warnings', []),
+        "severity": getattr(decision, 'severity', 'info'),
     })
 
 
@@ -511,3 +518,27 @@ async def compliance_report():
         ],
         "policies_active": config.MOCK_POLICIES,
     }
+
+
+# ---------------------------------------------------------------------------
+# Reset / Clear Data — For demos and testing
+# ---------------------------------------------------------------------------
+
+@app.post("/api/v1/reset")
+async def reset_all_data():
+    """
+    Clear all in-memory data and Neo4j data for a fresh start.
+    Use this before running demos.
+    """
+    from neo4j_driver import clear_all_data
+
+    # Clear in-memory data in main.py
+    _recent_decisions.clear()
+    _halted_agents.clear()
+    _halt_signals.clear()
+
+    # Clear neo4j fallback store AND Neo4j database
+    await clear_all_data()
+
+    print("[Reset] All data cleared")
+    return {"status": "reset", "message": "All data cleared. Ready for fresh demo."}

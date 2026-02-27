@@ -17,6 +17,24 @@ _fallback_steps: dict[str, list[dict]] = defaultdict(list)
 _neo4j_available: bool = True
 
 
+async def clear_all_data():
+    """Clear all data - both in-memory fallback and Neo4j."""
+    global _fallback_steps, _driver
+
+    # Clear in-memory fallback
+    _fallback_steps.clear()
+    print("[Neo4j] Cleared in-memory fallback data")
+
+    # Clear Neo4j if connected
+    if _driver and _driver.driver:
+        try:
+            async with _driver.driver.session() as session:
+                await session.run("MATCH (n) DETACH DELETE n")
+                print("[Neo4j] Cleared all Neo4j data")
+        except Exception as e:
+            print(f"[Neo4j] Failed to clear Neo4j: {e}")
+
+
 class Neo4jDriver:
     """Async Neo4j driver for AgentWatch telemetry storage and loop detection."""
 
@@ -214,8 +232,19 @@ class Neo4jDriver:
             except Exception as e:
                 print(f"[Neo4j] Graph query failed, using fallback: {e}")
 
-        # Fallback to in-memory
+        # Fallback to in-memory - filter out PENDING steps and dedupe by step_id
         steps = _fallback_steps.get(agent_id, [])
+
+        # Keep only the final decision for each step_id (not PENDING)
+        step_map = {}
+        for s in steps:
+            if s["decision"] != "PENDING":
+                step_map[s["step_id"]] = s
+
+        final_steps = list(step_map.values())
+        # Sort by timestamp
+        final_steps.sort(key=lambda x: x.get("timestamp", ""))
+
         nodes = [
             {
                 "id": s["step_id"],
@@ -227,11 +256,11 @@ class Neo4jDriver:
                 "reason": s["reason"],
                 "timestamp": s["timestamp"]
             }
-            for s in steps
+            for s in final_steps
         ]
         edges = [
-            {"source": steps[i]["step_id"], "target": steps[i+1]["step_id"], "type": "NEXT"}
-            for i in range(len(steps) - 1)
+            {"source": final_steps[i]["step_id"], "target": final_steps[i+1]["step_id"], "type": "NEXT"}
+            for i in range(len(final_steps) - 1)
         ]
         return {"agent_id": agent_id, "nodes": nodes, "edges": edges}
 
