@@ -236,7 +236,8 @@ function Sidebar({ agents, onStop, onResume, mockMode, selectedAgent, onSelectAg
 function LogCard({ entry }) {
   const [expanded, setExpanded] = useState(false);
   const isHalt = entry.decision === "HALT";
-  const hasWarnings = entry.warnings && entry.warnings.length > 0;
+  // Only show warnings on PROCEED decisions - warnings on HALT are irrelevant
+  const hasWarnings = !isHalt && entry.warnings && entry.warnings.length > 0;
 
   return (
     <div
@@ -294,7 +295,7 @@ function LogCard({ entry }) {
             </div>
           )}
           <div><span className="text-slate-500">reason: </span><span className="text-cyan-400">{entry.reason}</span></div>
-          {entry.warnings && entry.warnings.length > 0 && (
+          {!isHalt && entry.warnings && entry.warnings.length > 0 && (
             <div className="mt-2 p-2 bg-yellow-900/30 border border-yellow-700/50 rounded">
               <span className="text-yellow-400 font-bold">⚠ Warnings:</span>
               {entry.warnings.map((w, i) => (
