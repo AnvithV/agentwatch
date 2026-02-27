@@ -834,11 +834,14 @@ export default function AgentWatchDashboard() {
     return () => { cancelled = true; };
   }, []);
 
-  // ── Live polling: /recent + /stats every 3s (real backend) ──
+  // ── Fallback polling: only when WebSocket is NOT connected ──
+  // WebSocket is preferred for real-time updates; polling is backup only
   useEffect(() => {
-    if (mockMode) return; // handled by mock interval below
+    if (mockMode || wsConnected) return; // WebSocket handles updates when connected
 
     const interval = setInterval(async () => {
+      if (wsConnected) return; // Double-check WebSocket isn't connected
+
       try {
         const [recentData, statsData, agentsData] = await Promise.all([
           apiFetch("/recent?limit=30"),
@@ -882,10 +885,10 @@ export default function AgentWatchDashboard() {
       } catch {
         setConnected(false);
       }
-    }, 1500);  // Poll every 1.5 seconds for snappier updates
+    }, 2000);  // Poll every 2 seconds as fallback
 
     return () => clearInterval(interval);
-  }, [mockMode]);
+  }, [mockMode, wsConnected]);
 
   // ── WebSocket connection for real-time updates ──
   useEffect(() => {
@@ -911,28 +914,56 @@ export default function AgentWatchDashboard() {
             const decision = msg.data;
             const uid = decision.id || `${decision.agent_id}-${decision.step_id}`;
 
+            // Always add to logs (deduplication via seenIds)
             if (!seenIds.current.has(uid)) {
               seenIds.current.add(uid);
               setLogs((prev) => {
                 const updated = [{ ...decision, isNew: true }, ...prev].slice(0, 100);
                 setTimeout(() => {
-                  setLogs((l) => l.map((e) => e.id === uid ? { ...e, isNew: false } : e));
+                  setLogs((l) => l.map((e) => (e.id === uid || e.id === decision.id) ? { ...e, isNew: false } : e));
                 }, 1000);
                 return updated;
               });
-
-              // Refresh stats and agents
-              apiFetch("/stats").then(setStats).catch(() => {});
-              apiFetch("/agents").then((data) => {
-                const backendAgents = (data.agents || []).map((a) => ({
-                  ...a,
-                  name: AGENT_NAMES[a.agent_id] || a.agent_id,
-                  status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
-                  lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
-                }));
-                setAgents(backendAgents); // Always update, even if empty
-              }).catch(() => {});
             }
+
+            // Update stats (increment counts based on decision)
+            setStats((prev) => {
+              if (!prev) prev = { total_steps: 0, halt_count: 0, proceed_count: 0, violations_by_type: {} };
+              const updated = { ...prev };
+              updated.total_steps = (updated.total_steps || 0) + 1;
+              if (decision.decision === "HALT") {
+                updated.halt_count = (updated.halt_count || 0) + 1;
+                const reason = decision.reason || "UNKNOWN";
+                updated.violations_by_type = { ...updated.violations_by_type };
+                updated.violations_by_type[reason] = (updated.violations_by_type[reason] || 0) + 1;
+              } else {
+                updated.proceed_count = (updated.proceed_count || 0) + 1;
+              }
+              return updated;
+            });
+
+            // Update or add agent
+            setAgents((prev) => {
+              const agentId = decision.agent_id;
+              const existing = prev.find((a) => a.agent_id === agentId);
+              if (existing) {
+                return prev.map((a) => a.agent_id === agentId ? {
+                  ...a,
+                  total_steps: (a.total_steps || 0) + 1,
+                  halt_count: decision.decision === "HALT" ? (a.halt_count || 0) + 1 : a.halt_count,
+                  lastDecision: decision.decision,
+                } : a);
+              } else {
+                return [...prev, {
+                  agent_id: agentId,
+                  name: AGENT_NAMES[agentId] || agentId,
+                  total_steps: 1,
+                  halt_count: decision.decision === "HALT" ? 1 : 0,
+                  status: "RUNNING",
+                  lastDecision: decision.decision,
+                }];
+              }
+            });
           } else if (msg.type === "policy_update") {
             setPolicies(msg.data.policies);
           } else if (msg.type === "agent_status") {
