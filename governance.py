@@ -9,13 +9,11 @@ Pipeline order (fail-closed):
   5. PROCEED if all pass, HALT on first failure
 """
 
-import json
 import re
 import logging
 from datetime import datetime, timezone
 
 import aiohttp
-import anthropic
 
 import config
 from models import ExtractedEntities, GovernanceDecision
@@ -40,8 +38,11 @@ def _log(icon: str, tag: str, msg: str, color: str = _CYAN) -> None:
 # 1. Entity Extraction  (Fastino GLiNER)
 # ─────────────────────────────────────────────
 
+_TOTAL_COST_RE = re.compile(
+    r"total\s+cost\s+\$?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE
+)
 _PRICE_RE = re.compile(
-    r"(?:total cost|cost|price|at)\s*\$?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE
+    r"(?:cost|price|at)\s*\$?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE
 )
 _TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
 _ACTION_RE = re.compile(r"\b(BUY|SELL|HOLD|RESEARCH|EXECUTE|RECOMMEND)\b", re.IGNORECASE)
@@ -58,7 +59,7 @@ def _regex_extract(raw_log: str) -> dict:
     """Fallback entity extraction using regex when Fastino is unavailable."""
     entities: dict = {}
 
-    price_match = _PRICE_RE.search(raw_log)
+    price_match = _TOTAL_COST_RE.search(raw_log) or _PRICE_RE.search(raw_log)
     if price_match:
         entities["price"] = float(price_match.group(1).replace(",", ""))
 
@@ -96,11 +97,13 @@ async def extract_entities(raw_log: str) -> dict:
         return result
 
     payload = {
+        "task": "extract_entities",
         "text": raw_log,
-        "labels": ["price", "action_type", "ticker", "quantity", "vendor"],
+        "schema": ["total_cost", "unit_price", "action_type", "ticker", "quantity", "vendor"],
+        "threshold": 0.3,
     }
     headers = {
-        "Authorization": f"Bearer {config.FASTINO_API_KEY}",
+        "X-API-Key": config.FASTINO_API_KEY,
         "Content-Type": "application/json",
     }
 
@@ -115,25 +118,34 @@ async def extract_entities(raw_log: str) -> dict:
                 resp.raise_for_status()
                 data = await resp.json()
 
-        # Normalize Fastino response: list of {label, text} entities
+        # Fastino response: {"result": {"entities": {"label": ["value", ...]}}}
+        raw_entities = data.get("result", {}).get("entities", {})
         entities: dict = {}
-        for entity in data.get("entities", []):
-            label = entity.get("label", "").lower()
-            text = entity.get("text", "")
-            if label == "price":
-                cleaned = re.sub(r"[^\d.]", "", text)
-                if cleaned:
-                    entities["price"] = float(cleaned)
-            elif label == "action_type":
-                entities["action_type"] = text.upper()
-            elif label == "ticker":
-                entities["ticker"] = text.upper()
-            elif label == "quantity":
-                cleaned = re.sub(r"[^\d]", "", text)
-                if cleaned:
-                    entities["quantity"] = int(cleaned)
-            elif label == "vendor":
-                entities["vendor"] = text
+
+        def first(key):
+            vals = raw_entities.get(key, [])
+            return vals[0] if vals else None
+
+        total_cost = first("total_cost")
+        if total_cost:
+            cleaned = re.sub(r"[^\d.]", "", total_cost)
+            if cleaned:
+                entities["price"] = float(cleaned)
+        elif first("unit_price"):
+            cleaned = re.sub(r"[^\d.]", "", first("unit_price"))
+            if cleaned:
+                entities["price"] = float(cleaned)
+
+        if first("action_type"):
+            entities["action_type"] = first("action_type").upper()
+        if first("ticker"):
+            entities["ticker"] = first("ticker").upper()
+        if first("quantity"):
+            cleaned = re.sub(r"[^\d]", "", first("quantity"))
+            if cleaned:
+                entities["quantity"] = int(cleaned)
+        if first("vendor"):
+            entities["vendor"] = first("vendor")
 
         _log("🔍", "Fastino", f"Extracted: {entities}", _CYAN)
         return entities
@@ -269,8 +281,8 @@ def _mock_policy_check(entities: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
-# 3. Safety Check  (Anthropic moderation / keyword fallback)
-# Note: Modulate is SDK-only — using Anthropic Claude as the moderation layer
+# 3. Safety Check  (Modulate — keyword-based)
+# Note: Modulate is SDK-only (no REST API); using keyword pattern matching
 # ─────────────────────────────────────────────
 
 _TOXIC_PATTERNS = re.compile(
@@ -283,59 +295,15 @@ _URGENCY_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_SAFETY_PROMPT = """You are a safety classifier for an autonomous financial agent governance system.
-
-Analyze the following agent thought for safety violations. Look for:
-- Aggression or threatening language
-- Deception or manipulation
-- Coercion or high-pressure tactics
-- Guaranteed return claims (financial fraud indicators)
-- Pump-and-dump language
-
-Respond with ONLY valid JSON in this exact format:
-{"safe": true, "flags": []}
-or
-{"safe": false, "flags": ["flag1", "flag2"]}
-
-Possible flag values: toxic_language, manipulative_urgency, deception, coercion, fraud_indicators
-
-Agent thought: {thought}"""
-
 
 async def check_safety(thought: str) -> dict:
     """
-    Analyze agent thought for safety violations via Anthropic Claude.
-    Falls back to keyword/pattern check if ANTHROPIC_API_KEY is unavailable.
+    Analyze agent thought for safety violations via keyword pattern matching.
+    Modulate is SDK-only — this covers the text safety layer.
 
     Returns: {"safe": bool, "flags": list[str]}
     """
-    if not config.ANTHROPIC_API_KEY:
-        logger.warning("ANTHROPIC_API_KEY not set — using keyword safety fallback")
-        return _keyword_safety_check(thought)
-
-    try:
-        client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
-        message = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=100,
-            messages=[{
-                "role": "user",
-                "content": _SAFETY_PROMPT.format(thought=thought),
-            }],
-        )
-        raw = message.content[0].text.strip()
-        data = json.loads(raw)
-        flags = data.get("flags", [])
-        safe = data.get("safe", len(flags) == 0)
-        result = {"safe": safe, "flags": flags}
-        label = "SAFE" if safe else f"VIOLATION — {flags}"
-        color = _CYAN if safe else _RED
-        _log("🛡️", "Modulate", f"Anthropic safety: {label}", color)
-        return result
-
-    except Exception as exc:
-        logger.warning("Anthropic safety check failed (%s) — using keyword fallback", exc)
-        return _keyword_safety_check(thought)
+    return _keyword_safety_check(thought)
 
 
 def _keyword_safety_check(thought: str) -> dict:
