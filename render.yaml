@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: agentwatch
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: FASTINO_API_KEY
+        sync: false
+      - key: FASTINO_API_URL
+        value: https://api.pioneer.ai/gliner-2
+      - key: SENSO_API_KEY
+        sync: false
+      - key: SENSO_API_URL
+        value: https://apiv2.senso.ai/api/v1/org/search
+      - key: NEO4J_URI
+        sync: false
+      - key: NEO4J_USER
+        sync: false
+      - key: NEO4J_PASSWORD
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false

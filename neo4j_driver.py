@@ -282,6 +282,88 @@ class Neo4jDriver:
             del _fallback_steps[agent_id]
             print(f"[Fallback] Cleared data for agent: {agent_id}")
 
+    async def get_stats(self) -> dict:
+        """Get aggregated governance statistics."""
+        if self.driver and _neo4j_available:
+            try:
+                async with self.driver.session() as session:
+                    query = """
+                    MATCH (s:AgentStep)
+                    WHERE s.decision IN ['PROCEED', 'HALT']
+                    WITH s.decision AS decision, s.reason AS reason, count(*) AS cnt
+                    RETURN decision, reason, cnt
+                    ORDER BY cnt DESC
+                    """
+                    result = await session.run(query)
+                    records = await result.data()
+
+                    stats = {
+                        "total_steps": 0,
+                        "proceed_count": 0,
+                        "halt_count": 0,
+                        "violations_by_type": {}
+                    }
+
+                    for r in records:
+                        stats["total_steps"] += r["cnt"]
+                        if r["decision"] == "PROCEED":
+                            stats["proceed_count"] += r["cnt"]
+                        elif r["decision"] == "HALT":
+                            stats["halt_count"] += r["cnt"]
+                            reason = r["reason"] or "UNKNOWN"
+                            stats["violations_by_type"][reason] = stats["violations_by_type"].get(reason, 0) + r["cnt"]
+
+                    return stats
+            except Exception as e:
+                print(f"[Neo4j] Stats query failed: {e}")
+
+        # Fallback
+        stats = {"total_steps": 0, "proceed_count": 0, "halt_count": 0, "violations_by_type": {}}
+        for agent_id, steps in _fallback_steps.items():
+            for s in steps:
+                if s["decision"] in ["PROCEED", "HALT"]:
+                    stats["total_steps"] += 1
+                    if s["decision"] == "PROCEED":
+                        stats["proceed_count"] += 1
+                    else:
+                        stats["halt_count"] += 1
+                        reason = s.get("reason", "UNKNOWN")
+                        stats["violations_by_type"][reason] = stats["violations_by_type"].get(reason, 0) + 1
+        return stats
+
+    async def list_agents(self) -> dict:
+        """List all agents with step counts."""
+        if self.driver and _neo4j_available:
+            try:
+                async with self.driver.session() as session:
+                    query = """
+                    MATCH (a:Agent)-[:HAS_STEP]->(s:AgentStep)
+                    WHERE s.decision IN ['PROCEED', 'HALT']
+                    WITH a.agent_id AS agent_id,
+                         count(*) AS total_steps,
+                         sum(CASE WHEN s.decision = 'HALT' THEN 1 ELSE 0 END) AS halt_count,
+                         max(s.timestamp) AS last_activity
+                    RETURN agent_id, total_steps, halt_count, toString(last_activity) AS last_activity
+                    ORDER BY last_activity DESC
+                    """
+                    result = await session.run(query)
+                    records = await result.data()
+                    return {"agents": records, "count": len(records)}
+            except Exception as e:
+                print(f"[Neo4j] List agents failed: {e}")
+
+        # Fallback
+        agents = []
+        for agent_id, steps in _fallback_steps.items():
+            halt_count = sum(1 for s in steps if s.get("decision") == "HALT")
+            agents.append({
+                "agent_id": agent_id,
+                "total_steps": len(steps),
+                "halt_count": halt_count,
+                "last_activity": steps[-1]["timestamp"] if steps else None
+            })
+        return {"agents": agents, "count": len(agents)}
+
 
 # ---------------------------------------------------------------------------
 # Singleton + convenience functions
@@ -314,3 +396,21 @@ async def get_agent_graph(agent_id: str) -> dict:
     """Returns nodes + edges for the reasoning graph of a given agent."""
     driver = await get_driver()
     return await driver.get_agent_graph(agent_id)
+
+
+async def get_stats() -> dict:
+    """Returns aggregated governance statistics across all agents."""
+    driver = await get_driver()
+    return await driver.get_stats()
+
+
+async def list_agents() -> dict:
+    """Returns list of all agents with their step counts."""
+    driver = await get_driver()
+    return await driver.list_agents()
+
+
+async def get_halted_steps(agent_id: str) -> list:
+    """Returns all HALT steps for an agent."""
+    driver = await get_driver()
+    return await driver.get_halted_steps(agent_id)

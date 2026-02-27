@@ -233,51 +233,72 @@ async def check_policy(entities: dict, agent_id: str) -> dict:
 
 
 def _mock_policy_check(entities: dict) -> dict:
-    """Evaluate entities against MOCK_POLICIES."""
+    """Evaluate entities against MOCK_POLICIES with severity levels."""
     policies = config.MOCK_POLICIES
+    warnings = []
 
     price = entities.get("price")
-    if price is not None and price > policies["budget_limit"]:
-        result = {
-            "compliant": False,
-            "violation": f"cost ${price:,.2f} exceeds budget limit ${policies['budget_limit']:,}",
-            "policy_limit": policies["budget_limit"],
-        }
-        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
-        return result
+    if price is not None:
+        # Hard limit: HALT
+        if price > policies["budget_limit"]:
+            result = {
+                "compliant": False,
+                "severity": "critical",
+                "violation": f"cost ${price:,.2f} exceeds budget limit ${policies['budget_limit']:,}",
+                "policy_limit": policies["budget_limit"],
+                "warnings": warnings,
+            }
+            _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+            return result
+        # Soft limit: WARN (80% of budget)
+        elif price > policies["budget_limit"] * 0.8:
+            warnings.append(f"Approaching budget limit: ${price:,.2f} is {price/policies['budget_limit']*100:.0f}% of ${policies['budget_limit']:,}")
+            _log("⚠️", "Senso", f"WARNING: Approaching budget limit ({price/policies['budget_limit']*100:.0f}%)", _YELLOW)
 
     ticker = entities.get("ticker")
     if ticker and ticker in policies["restricted_tickers"]:
         result = {
             "compliant": False,
+            "severity": "critical",
             "violation": f"ticker {ticker} is on the restricted list",
             "policy_limit": None,
+            "warnings": warnings,
         }
         _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
         return result
 
     qty = entities.get("quantity")
-    if qty is not None and qty > policies["max_position_size"]:
-        result = {
-            "compliant": False,
-            "violation": f"quantity {qty} exceeds max position size {policies['max_position_size']}",
-            "policy_limit": policies["max_position_size"],
-        }
-        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
-        return result
+    if qty is not None:
+        # Hard limit: HALT
+        if qty > policies["max_position_size"]:
+            result = {
+                "compliant": False,
+                "severity": "critical",
+                "violation": f"quantity {qty} exceeds max position size {policies['max_position_size']}",
+                "policy_limit": policies["max_position_size"],
+                "warnings": warnings,
+            }
+            _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+            return result
+        # Soft limit: WARN (80% of position size)
+        elif qty > policies["max_position_size"] * 0.8:
+            warnings.append(f"Approaching position limit: {qty} shares is {qty/policies['max_position_size']*100:.0f}% of {policies['max_position_size']}")
+            _log("⚠️", "Senso", f"WARNING: Approaching position limit ({qty/policies['max_position_size']*100:.0f}%)", _YELLOW)
 
     action = entities.get("action_type")
     if action and action not in policies["allowed_actions"]:
         result = {
             "compliant": False,
+            "severity": "warning",  # Less severe - just unknown action
             "violation": f"action '{action}' is not in allowed actions",
             "policy_limit": None,
+            "warnings": warnings,
         }
         _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
         return result
 
     _log("📋", "Senso", "Policy check via API: COMPLIANT", _CYAN)
-    return {"compliant": True, "violation": None, "policy_limit": None}
+    return {"compliant": True, "severity": "info", "violation": None, "policy_limit": None, "warnings": warnings}
 
 
 # ─────────────────────────────────────────────
@@ -345,28 +366,37 @@ async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
 
     now = datetime.now(timezone.utc)
 
-    def _halt(reason: str, details: str, triggered_by: str) -> GovernanceDecision:
+    accumulated_warnings: list[str] = []
+
+    def _halt(reason: str, details: str, triggered_by: str, severity: str = "critical") -> GovernanceDecision:
         _log("🛑", "AgentWatch", f"Decision: HALT — {reason}", _RED)
         return GovernanceDecision(
             agent_id=agent_id,
             step_id=step_id,
             decision="HALT",
+            severity=severity,
             reason=reason,
             details=details,
             triggered_by=triggered_by,
             timestamp=now,
+            warnings=accumulated_warnings,
         )
 
     def _proceed() -> GovernanceDecision:
-        _log("✅", "AgentWatch", "Decision: PROCEED", _GREEN)
+        if accumulated_warnings:
+            _log("⚠️", "AgentWatch", f"Decision: PROCEED with {len(accumulated_warnings)} warning(s)", _YELLOW)
+        else:
+            _log("✅", "AgentWatch", "Decision: PROCEED", _GREEN)
         return GovernanceDecision(
             agent_id=agent_id,
             step_id=step_id,
             decision="PROCEED",
+            severity="warning" if accumulated_warnings else "info",
             reason="APPROVED",
-            details="All governance checks passed",
+            details="All governance checks passed" + (f" ({len(accumulated_warnings)} warnings)" if accumulated_warnings else ""),
             triggered_by="governance_pipeline",
             timestamp=now,
+            warnings=accumulated_warnings,
         )
 
     # ── Step 1: Entity extraction (Fastino) ──────────────────────────────────
@@ -391,13 +421,17 @@ async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
             "senso_policy_check",
         )
 
+    # Accumulate any warnings from policy check
+    accumulated_warnings.extend(policy_result.get("warnings", []))
+
     if not policy_result.get("compliant", True):
         violation = policy_result.get("violation", "unknown policy violation")
         limit = policy_result.get("policy_limit")
+        severity = policy_result.get("severity", "critical")
         details = f"{violation}"
         if limit is not None:
             details += f" (limit: {limit})"
-        return _halt("POLICY_VIOLATION", details, "senso_policy_check")
+        return _halt("POLICY_VIOLATION", details, "senso_policy_check", severity)
 
     # ── Step 3: Safety check (Modulate) ──────────────────────────────────────
     try:

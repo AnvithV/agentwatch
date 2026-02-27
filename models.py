@@ -17,11 +17,13 @@ class TelemetryEvent(BaseModel):
 class GovernanceDecision(BaseModel):
     agent_id: str
     step_id: str
-    decision: str  # "HALT" or "PROCEED"
+    decision: str  # "HALT", "WARN", or "PROCEED"
+    severity: str = "info"  # "critical", "warning", "info"
     reason: str  # POLICY_VIOLATION | LOOP_DETECTED | SAFETY_VIOLATION | FACT_CHECK_FAILED | APPROVED
     details: str
     triggered_by: str
     timestamp: datetime
+    warnings: list[str] = []  # Accumulated warnings even on PROCEED
 
 
 class ExtractedEntities(BaseModel):
