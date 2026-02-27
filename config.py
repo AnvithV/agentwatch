@@ -20,6 +20,9 @@ SENSO_API_KEY = os.getenv("SENSO_API_KEY", "")
 MODULATE_API_URL = os.getenv("MODULATE_API_URL", "")
 MODULATE_API_KEY = os.getenv("MODULATE_API_KEY", "")
 
+# Anthropic
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
 # AgentWatch
 AGENTWATCH_HOST = os.getenv("AGENTWATCH_HOST", "http://localhost:8000")
 LOOP_THRESHOLD = int(os.getenv("LOOP_THRESHOLD", "3"))
