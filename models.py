@@ -12,6 +12,9 @@ class TelemetryEvent(BaseModel):
     input_parameters: dict
     observation: str
     raw_log: str
+    # Cross-agent causal chain: reference to parent step from another agent
+    parent_step_id: Optional[str] = None
+    parent_agent_id: Optional[str] = None
 
 
 class GovernanceDecision(BaseModel):
