@@ -139,7 +139,7 @@ async def demo_scenario_1_happy_path(client: httpx.AsyncClient):
         observation=search_result,
         raw_log="Agent performed RESEARCH on MSFT",
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 
     # Step 2: Analyze
     await agent.send_step(
@@ -150,7 +150,7 @@ async def demo_scenario_1_happy_path(client: httpx.AsyncClient):
         observation="P/E ratio within normal range",
         raw_log="Agent recommends HOLD on MSFT",
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 
     # Step 3: Small compliant trade
     await agent.send_step(
@@ -181,7 +181,7 @@ async def demo_scenario_2_warning_then_halt(client: httpx.AsyncClient):
         observation="Order prepared",
         raw_log="Agent decided to BUY 350 shares of AAPL at $242.50, total cost $84,875",
     )
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(0.3)
 
     if agent.halted:
         return
@@ -215,7 +215,7 @@ async def demo_scenario_3_restricted_ticker(client: httpx.AsyncClient):
         observation="High social media activity detected",
         raw_log="Agent performed RESEARCH on GME",
     )
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 
     if agent.halted:
         print(f"\n  {RED}✗ Scenario 3 — Halted on restricted ticker{RESET}")
@@ -303,7 +303,7 @@ async def demo_scenario_6_dynamic_policy(client: httpx.AsyncClient):
 
     for i in range(5, 0, -1):
         print(f"  {YELLOW}  Continuing in {i}...{RESET}", end='\r')
-        await asyncio.sleep(1)
+        await asyncio.sleep(1)  # Keep 1 second per tick for 5-second countdown
     print(f"  {YELLOW}  Continuing now!   {RESET}")
 
     # Step 3: Agent tries to buy more NVDA — should be blocked if you added it!
@@ -349,7 +349,7 @@ async def demo_scenario_7_webhook_demo(client: httpx.AsyncClient):
         raw_log="Agent decided to BUY 100 shares of AMC at $5",
     )
 
-    await asyncio.sleep(1)
+    await asyncio.sleep(0.3)
 
     # Show webhook was received
     print(f"\n  {MAGENTA}[System] Checking webhook signals received...{RESET}")
@@ -407,27 +407,27 @@ async def main():
         await client.post(f"{API_BASE}/api/v1/reset")
         print(f"  {GREEN}✓ Data cleared{RESET}")
 
-        # Run all scenarios
+        # Run all scenarios (fast transitions)
         await demo_scenario_1_happy_path(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_2_warning_then_halt(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_3_restricted_ticker(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_4_loop_detection(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_5_safety_violation(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_6_dynamic_policy(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         await demo_scenario_7_webhook_demo(client)
-        await asyncio.sleep(2)
+        await asyncio.sleep(0.5)
 
         # Final report
         await show_final_stats(client)
