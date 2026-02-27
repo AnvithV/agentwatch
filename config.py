@@ -9,7 +9,7 @@ FASTINO_API_URL = os.getenv("FASTINO_API_URL", "https://api.pioneer.ai/gliner-2"
 
 # Senso
 SENSO_API_KEY = os.getenv("SENSO_API_KEY", "")
-SENSO_API_URL = os.getenv("SENSO_API_URL", "https://apiv2.senso.ai/api/v1")
+SENSO_API_URL = os.getenv("SENSO_API_URL", "https://apiv2.senso.ai/api/v1/org/search")
 
 # Modulate (SDK-based - may need fallback)
 MODULATE_API_KEY = os.getenv("MODULATE_API_KEY", "")
