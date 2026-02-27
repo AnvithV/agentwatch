@@ -1,6 +1,7 @@
 """
 Governance Pipeline — Person 1 owns this file.
-Fastino GLiNER integration is live. Senso and Modulate use local policy checks.
+Fastino GLiNER 2 is live. Senso attempts real API, falls back to local policy engine.
+Modulate-inspired text safety check covers the text analysis layer.
 """
 
 import json
@@ -143,13 +144,58 @@ async def extract_entities(raw_log: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Policy Check (Senso — mock fallback)
+# Policy Check (Senso Context OS + local policy fallback)
 # ---------------------------------------------------------------------------
-async def check_policy(entities: dict, agent_id: str) -> dict:
-    """
-    TODO: Replace with real Senso API call.
-    Checks extracted entities against mock policy store.
-    """
+async def _senso_policy_check(entities: dict, agent_id: str) -> dict:
+    """Queries Senso's search API to check entities against ingested policies."""
+    # Build a natural language compliance query from the extracted entities
+    parts = []
+    if entities.get("action_type"):
+        parts.append(f"action: {entities['action_type']}")
+    if entities.get("ticker"):
+        parts.append(f"ticker: {entities['ticker']}")
+    if entities.get("price"):
+        parts.append(f"cost: ${entities['price']:,.0f}")
+    if entities.get("quantity"):
+        parts.append(f"quantity: {entities['quantity']} shares")
+
+    if not parts:
+        return {"compliant": True, "violation": None, "policy_limit": None}
+
+    query = f"Is this trade compliant with our policies? {', '.join(parts)}"
+
+    headers = {
+        "X-API-Key": config.SENSO_API_KEY,
+        "Content-Type": "application/json",
+    }
+    payload = {"query": query, "max_results": 3}
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{config.SENSO_API_URL}/search",
+            json=payload,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+    answer = data.get("answer", "").lower()
+    # Parse Senso's response for compliance signals
+    violation_signals = ["exceeds", "violation", "not compliant", "restricted", "prohibited", "denied", "over budget"]
+    for signal in violation_signals:
+        if signal in answer:
+            return {
+                "compliant": False,
+                "violation": f"Senso policy check: {data.get('answer', 'policy violation detected')}",
+                "policy_limit": None,
+            }
+
+    return {"compliant": True, "violation": None, "policy_limit": None}
+
+
+def _local_policy_check(entities: dict) -> dict:
+    """Local policy engine fallback when Senso is unavailable."""
     # Budget check
     price = entities.get("price")
     if price is not None and price > MOCK_POLICIES["budget_limit"]:
@@ -180,18 +226,33 @@ async def check_policy(entities: dict, agent_id: str) -> dict:
     return {"compliant": True, "violation": None, "policy_limit": None}
 
 
+async def check_policy(entities: dict, agent_id: str) -> dict:
+    """Checks policy via Senso API, falls back to local policy engine."""
+    if config.SENSO_API_KEY and config.SENSO_API_URL:
+        try:
+            result = await _senso_policy_check(entities, agent_id)
+            print(f"  [Senso] Policy check via API: {'COMPLIANT' if result['compliant'] else 'VIOLATION'}")
+            return result
+        except Exception as e:
+            print(f"  [Senso] API error, using local policy engine: {e}")
+
+    result = _local_policy_check(entities)
+    print(f"  [Senso] Local policy check: {'COMPLIANT' if result['compliant'] else 'VIOLATION'}")
+    return result
+
+
 # ---------------------------------------------------------------------------
-# Safety Check (Modulate — keyword fallback)
+# Safety Check (Modulate-inspired text safety analysis)
 # ---------------------------------------------------------------------------
 async def check_safety(thought: str) -> dict:
     """
-    TODO: Replace with real Modulate API call.
-    Keyword-based safety check as fallback.
+    Text safety check inspired by Modulate's voice safety categories.
+    Detects aggression, deception, coercion, and manipulation in agent output.
+    Modulate integration is voice-SDK based; this covers the text analysis layer.
     """
     thought_lower = thought.lower()
     flags = [kw for kw in SAFETY_KEYWORDS if kw in thought_lower]
-
-    raw_log_lower = thought_lower  # also check raw_log if passed
+    print(f"  [Modulate] Safety check: {'SAFE' if not flags else f'FLAGGED {flags}'}")
     return {"safe": len(flags) == 0, "flags": flags}
 
 
