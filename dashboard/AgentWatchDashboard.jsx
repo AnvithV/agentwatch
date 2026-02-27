@@ -11,7 +11,6 @@ import {
   WifiOff,
   Shield,
   Zap,
-  RefreshCw,
 } from "lucide-react";
 import {
   BarChart,
@@ -23,7 +22,7 @@ import {
   Cell,
 } from "recharts";
 
-// ─── API helpers ──────────────────────────────────────────────────────────────
+// ─── API ──────────────────────────────────────────────────────────────────────
 
 const API = "/api/v1";
 
@@ -33,73 +32,6 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
-// ─── Mock Data Fallback ───────────────────────────────────────────────────────
-// Used when backend is unreachable (demo / standalone mode)
-
-const TOOLS = ["tavily_search", "execute_trade", "generate_recommendation", "web_scrape", "send_email"];
-const THOUGHTS = [
-  "Researching Apple's latest earnings before making a recommendation.",
-  "Executing BUY order for 200 shares of NVDA at market price.",
-  "Scraping financial news for MSFT sentiment analysis.",
-  "Generating portfolio rebalancing recommendation based on risk profile.",
-  "Sending daily summary report to portfolio manager.",
-  "Searching for SEC filings on AAPL insider trading activity.",
-  "Analyzing TSLA price momentum over last 30 days.",
-  "Checking compliance for large block trade of AMZN.",
-];
-const HALT_THOUGHTS = [
-  "Must buy this stock NOW or we will lose everything — guaranteed returns.",
-  "Executing trade for 1500 shares of AMC — restricted ticker detected.",
-  "Processing order for $180,000 total cost — exceeds budget limit.",
-  "Immediate urgent action required: dump all holdings NOW.",
-];
-const TICKERS = ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "AMD"];
-const HALT_REASONS = ["POLICY_VIOLATION", "LOOP_DETECTED", "SAFETY_VIOLATION", "FACT_CHECK_FAILED"];
-
-function randomFrom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
-
-const MOCK_AGENTS = [
-  { agent_id: "agent-001", name: "TradeBot Alpha",   status: "RUNNING", halt_count: 0, total_steps: 12 },
-  { agent_id: "agent-002", name: "RiskGuard Beta",   status: "HALTED",  halt_count: 3, total_steps: 8  },
-  { agent_id: "agent-003", name: "RecoEngine v2",    status: "RUNNING", halt_count: 1, total_steps: 20 },
-  { agent_id: "agent-004", name: "MarketScanner",    status: "RUNNING", halt_count: 0, total_steps: 15 },
-  { agent_id: "agent-005", name: "ComplianceBot",    status: "RUNNING", halt_count: 0, total_steps: 30 },
-  { agent_id: "agent-006", name: "SentimentAI",      status: "RUNNING", halt_count: 2, total_steps: 18 },
-  { agent_id: "agent-007", name: "ArbitrageX",       status: "HALTED",  halt_count: 5, total_steps: 10 },
-  { agent_id: "agent-008", name: "ReportGen Pro",    status: "RUNNING", halt_count: 0, total_steps: 25 },
-];
-
-function makeMockEntry(agentId, forceHalt = false) {
-  const isHalt = forceHalt || Math.random() < 0.25;
-  const reason = isHalt ? randomFrom(HALT_REASONS) : "APPROVED";
-  return {
-    id: `${agentId}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    agent_id: agentId,
-    decision: isHalt ? "HALT" : "PROCEED",
-    reason,
-    details: isHalt ? `Violation: ${reason}` : "All governance checks passed",
-    triggered_by: isHalt ? "senso_policy_check" : "governance_pipeline",
-    thought: isHalt ? randomFrom(HALT_THOUGHTS) : randomFrom(THOUGHTS),
-    tool_used: randomFrom(TOOLS),
-    raw_log: `Agent ${agentId} initiated ${randomFrom(TOOLS)} with ticker ${randomFrom(TICKERS)}, qty ${randomInt(50, 1000)}, cost $${randomInt(5000, 200000).toLocaleString()}`,
-    timestamp: new Date().toISOString(),
-    isNew: true,
-  };
-}
-
-function generateMockLogs() {
-  const logs = [];
-  for (let i = 0; i < 22; i++) {
-    const agent = randomFrom(MOCK_AGENTS);
-    const entry = makeMockEntry(agent.agent_id);
-    entry.timestamp = new Date(Date.now() - (22 - i) * 12000).toISOString();
-    entry.isNew = false;
-    logs.push(entry);
-  }
-  return logs.reverse();
-}
-
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function timeAgo(dateStr) {
@@ -107,16 +39,6 @@ function timeAgo(dateStr) {
   if (secs < 60) return `${secs}s ago`;
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   return `${Math.floor(secs / 3600)}h ago`;
-}
-
-// Merge backend agent list with local halt state
-function mergeAgents(backendAgents, localHalted, agentNames) {
-  return backendAgents.map((a) => ({
-    ...a,
-    name: agentNames[a.agent_id] || a.agent_id,
-    status: localHalted.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
-    lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
-  }));
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -138,7 +60,7 @@ function DecisionBadge({ decision }) {
 
 // ─── Left Sidebar ─────────────────────────────────────────────────────────────
 
-function Sidebar({ agents, onStop, mockMode }) {
+function Sidebar({ agents, onStop, connected }) {
   const total = agents.length;
   const active = agents.filter((a) => a.status === "RUNNING").length;
   const halted = agents.filter((a) => a.status === "HALTED").length;
@@ -150,48 +72,48 @@ function Sidebar({ agents, onStop, mockMode }) {
         <div className="flex items-center gap-2.5 mb-1">
           <Shield className="w-5 h-5 text-cyan-400" />
           <span className="text-white font-bold tracking-tight text-lg">AgentWatch</span>
-          <span className={`ml-auto w-2.5 h-2.5 rounded-full flex-shrink-0 ${globalStatus === "RUNNING" ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`} />
+          <span className={`ml-auto w-2.5 h-2.5 rounded-full flex-shrink-0 ${globalStatus === "RUNNING" && connected ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`} />
         </div>
-        <p className="text-slate-500 text-xs font-mono flex items-center gap-1">
-          governance pipeline
-          {mockMode && <span className="text-yellow-500 ml-1">[demo]</span>}
-        </p>
+        <p className="text-slate-500 text-xs font-mono">governance pipeline</p>
       </div>
 
       <div className="flex-1 overflow-y-auto py-2">
-        {agents.map((agent) => (
-          <div
-            key={agent.agent_id}
-            className={`px-3 py-2.5 mx-2 mb-1 rounded border transition-colors ${
-              agent.status === "HALTED"
-                ? "bg-red-950/40 border-red-700/40"
-                : "bg-slate-800/40 border-slate-700/20 hover:border-slate-600/50"
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <StatusDot status={agent.status} />
-              <span className="text-slate-200 text-sm font-medium truncate flex-1">{agent.name}</span>
-              {agent.status !== "HALTED" && (
-                <button
-                  onClick={() => onStop(agent.agent_id)}
-                  title="Stop agent"
-                  className="text-slate-500 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-950/50"
-                >
-                  <Square className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-500 text-xs font-mono">{agent.agent_id}</span>
-              <DecisionBadge decision={agent.lastDecision || "PROCEED"} />
-            </div>
-            {agent.total_steps != null && (
-              <div className="mt-1 text-slate-600 text-xs font-mono">
-                {agent.total_steps} steps · {agent.halt_count || 0} halts
-              </div>
-            )}
+        {agents.length === 0 ? (
+          <div className="px-4 py-8 text-center text-slate-600 text-xs font-mono">
+            {connected ? "waiting for agents..." : "backend offline"}
           </div>
-        ))}
+        ) : (
+          agents.map((agent) => (
+            <div
+              key={agent.agent_id}
+              className={`px-3 py-2.5 mx-2 mb-1 rounded border transition-colors ${
+                agent.status === "HALTED"
+                  ? "bg-red-950/40 border-red-700/40"
+                  : "bg-slate-800/40 border-slate-700/20 hover:border-slate-600/50"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <StatusDot status={agent.status} />
+                <span className="text-slate-200 text-sm font-medium truncate flex-1">{agent.agent_id}</span>
+                {agent.status !== "HALTED" && (
+                  <button
+                    onClick={() => onStop(agent.agent_id)}
+                    title="Stop agent"
+                    className="text-slate-500 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-950/50"
+                  >
+                    <Square className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-600 text-xs font-mono">
+                  {agent.total_steps} steps · {agent.halt_count} halts
+                </span>
+                <DecisionBadge decision={agent.halt_count > 0 ? "HALT" : "PROCEED"} />
+              </div>
+            </div>
+          ))
+        )}
       </div>
 
       <div className="border-t border-slate-700/50 px-4 py-3 grid grid-cols-3 gap-2">
@@ -235,9 +157,11 @@ function LogCard({ entry }) {
             <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-slate-700/60 text-cyan-400 border border-slate-600/40">
               {entry.agent_id}
             </span>
-            <span className="text-xs font-mono text-slate-500 px-1.5 py-0.5 rounded bg-slate-800/60 border border-slate-700/30">
-              {entry.tool_used}
-            </span>
+            {entry.tool_used && entry.tool_used !== "—" && (
+              <span className="text-xs font-mono text-slate-500 px-1.5 py-0.5 rounded bg-slate-800/60 border border-slate-700/30">
+                {entry.tool_used}
+              </span>
+            )}
             <span className="text-xs text-slate-500 ml-auto flex-shrink-0">{timeAgo(entry.timestamp)}</span>
           </div>
           <p className="text-slate-300 text-sm leading-snug mb-1 font-mono">{entry.thought}</p>
@@ -272,19 +196,19 @@ function LogCard({ entry }) {
 // ─── Center Panel ─────────────────────────────────────────────────────────────
 
 function CenterPanel({ logs, connected, stats }) {
-  const total = stats?.total_steps ?? logs.length;
-  const halts = stats?.halt_count ?? logs.filter((l) => l.decision === "HALT").length;
-  const proceeds = stats?.proceed_count ?? logs.filter((l) => l.decision === "PROCEED").length;
+  const total = stats?.total_steps ?? 0;
+  const halts = stats?.halt_count ?? 0;
+  const proceeds = stats?.proceed_count ?? 0;
   const violationRate = total > 0 ? ((halts / total) * 100).toFixed(1) : "0.0";
 
   return (
     <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
       <div className="grid grid-cols-4 gap-3 p-4 border-b border-slate-700/50 bg-slate-900/50">
         {[
-          { label: "Total Steps",     value: total,           color: "text-slate-200",  icon: <Activity className="w-4 h-4 text-cyan-400" />      },
-          { label: "HALTs",           value: halts,           color: "text-red-400",    icon: <XCircle className="w-4 h-4 text-red-400" />         },
-          { label: "Proceeds",        value: proceeds,        color: "text-emerald-400",icon: <CheckCircle className="w-4 h-4 text-emerald-400" /> },
-          { label: "Violation Rate",  value: `${violationRate}%`, color: "text-yellow-400", icon: <AlertTriangle className="w-4 h-4 text-yellow-400" /> },
+          { label: "Total Steps",    value: total,            color: "text-slate-200",   icon: <Activity className="w-4 h-4 text-cyan-400" />       },
+          { label: "HALTs",          value: halts,            color: "text-red-400",     icon: <XCircle className="w-4 h-4 text-red-400" />          },
+          { label: "Proceeds",       value: proceeds,         color: "text-emerald-400", icon: <CheckCircle className="w-4 h-4 text-emerald-400" />  },
+          { label: "Violation Rate", value: `${violationRate}%`, color: "text-yellow-400", icon: <AlertTriangle className="w-4 h-4 text-yellow-400" /> },
         ].map(({ label, value, color, icon }) => (
           <div key={label} className="bg-slate-800/60 border border-slate-700/40 rounded p-3">
             <div className="flex items-center gap-1.5 mb-1.5">{icon}<span className="text-slate-400 text-xs">{label}</span></div>
@@ -301,15 +225,25 @@ function CenterPanel({ logs, connected, stats }) {
           {connected ? (
             <><Wifi className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-400 text-xs font-mono">live</span></>
           ) : (
-            <><WifiOff className="w-3.5 h-3.5 text-yellow-400" /><span className="text-yellow-400 text-xs font-mono">demo mode</span></>
+            <><WifiOff className="w-3.5 h-3.5 text-red-400" /><span className="text-red-400 text-xs font-mono">backend offline</span></>
           )}
         </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-4 py-3">
-        {logs.map((entry) => (
-          <LogCard key={entry.id || `${entry.agent_id}-${entry.step_id}-${entry.timestamp}`} entry={entry} />
-        ))}
+        {logs.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-slate-600 font-mono text-sm gap-2">
+            <Zap className="w-8 h-8 text-slate-700" />
+            {connected
+              ? <span>waiting for agent telemetry...</span>
+              : <span>backend offline — start uvicorn to connect</span>
+            }
+          </div>
+        ) : (
+          logs.map((entry) => (
+            <LogCard key={entry.id || `${entry.agent_id}-${entry.step_id}-${entry.timestamp}`} entry={entry} />
+          ))
+        )}
       </div>
     </div>
   );
@@ -328,6 +262,14 @@ function ReasoningGraph({ logs }) {
     agentId: entry.agent_id,
   }));
   const edges = nodes.slice(1).map((node, i) => ({ from: nodes[i], to: node }));
+
+  if (nodes.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-700 text-xs font-mono">
+        no steps yet
+      </div>
+    );
+  }
 
   return (
     <div className="relative">
@@ -348,8 +290,8 @@ function ReasoningGraph({ logs }) {
               stroke={node.decision === "PROCEED" ? "#10b981" : "#ef4444"}
               strokeWidth="1.5" />
             <text x={node.x} y={node.y + 1} textAnchor="middle" dominantBaseline="middle"
-              fontSize="7" fill={node.decision === "PROCEED" ? "#34d399" : "#f87171"} fontFamily="monospace">
-              {(node.agentId || "").split("-")[1] || "?"}
+              fontSize="6" fill={node.decision === "PROCEED" ? "#34d399" : "#f87171"} fontFamily="monospace">
+              {(node.agentId || "").slice(0, 6)}
             </text>
           </g>
         ))}
@@ -367,13 +309,9 @@ function ReasoningGraph({ logs }) {
 // ─── Right Panel ──────────────────────────────────────────────────────────────
 
 function RightPanel({ logs, stats }) {
-  const violationsSource = stats?.violations_by_type;
-  const violationCounts = violationsSource
-    ? Object.entries(violationsSource).map(([name, count]) => ({ name: name.replace(/_/g, " "), count }))
-    : ["POLICY_VIOLATION", "LOOP_DETECTED", "SAFETY_VIOLATION", "FACT_CHECK_FAILED"].map((r) => ({
-        name: r.replace(/_/g, " "),
-        count: logs.filter((l) => l.reason === r).length,
-      })).filter((d) => d.count > 0);
+  const violationCounts = stats?.violations_by_type
+    ? Object.entries(stats.violations_by_type).map(([name, count]) => ({ name: name.replace(/_/g, " "), count }))
+    : [];
 
   const COLORS = ["#ef4444", "#f59e0b", "#8b5cf6", "#06b6d4"];
 
@@ -406,7 +344,7 @@ function RightPanel({ logs, stats }) {
             </BarChart>
           </ResponsiveContainer>
         ) : (
-          <div className="text-slate-600 text-xs font-mono text-center py-8">no violations detected</div>
+          <div className="text-slate-700 text-xs font-mono text-center py-8">no violations yet</div>
         )}
       </div>
     </div>
@@ -434,155 +372,76 @@ const styles = `
 
 // ─── Root App ─────────────────────────────────────────────────────────────────
 
-// Friendly names for agent IDs (populated by the backend's agent_id field)
-const AGENT_NAMES = {
-  "agent-001": "TradeBot Alpha",
-  "agent-002": "RiskGuard Beta",
-  "agent-003": "RecoEngine v2",
-  "agent-004": "MarketScanner",
-  "agent-005": "ComplianceBot",
-  "agent-006": "SentimentAI",
-  "agent-007": "ArbitrageX",
-  "agent-008": "ReportGen Pro",
-};
-
 export default function AgentWatchDashboard() {
   const [agents, setAgents] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [stats, setStats] = useState(null);
+  const [logs, setLogs]     = useState([]);
+  const [stats, setStats]   = useState(null);
   const [connected, setConnected] = useState(false);
-  const [mockMode, setMockMode] = useState(false);
   const localHalted = useRef(new Set());
-  const seenIds = useRef(new Set());
-  const mockIntervalRef = useRef(null);
+  const seenIds     = useRef(new Set());
 
-  // ── Bootstrap: try real backend, fall back to mock ──
+  function mapAgents(raw) {
+    return (raw || []).map((a) => ({
+      ...a,
+      status: localHalted.current.has(a.agent_id)
+        ? "HALTED"
+        : a.halt_count > 0
+        ? "WARNING"
+        : "RUNNING",
+    }));
+  }
+
+  // ── Poll backend every 3 seconds ──────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
 
-    async function bootstrap() {
-      try {
-        // Try fetching agents + recent decisions
-        const [agentsData, recentData, statsData] = await Promise.all([
-          apiFetch("/agents"),
-          apiFetch("/recent?limit=30"),
-          apiFetch("/stats"),
-        ]);
-
-        if (cancelled) return;
-
-        // Map backend agents to UI shape
-        const backendAgents = (agentsData.agents || []).map((a) => ({
-          ...a,
-          name: AGENT_NAMES[a.agent_id] || a.agent_id,
-          status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
-          lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
-        }));
-
-        const decisions = (recentData.decisions || []).map((d) => ({ ...d, isNew: false }));
-        decisions.forEach((d) => seenIds.current.add(d.id || `${d.agent_id}-${d.step_id}`));
-
-        setAgents(backendAgents.length > 0 ? backendAgents : MOCK_AGENTS);
-        setLogs(decisions.length > 0 ? decisions : generateMockLogs());
-        setStats(statsData);
-        setConnected(true);
-        setMockMode(backendAgents.length === 0);
-      } catch {
-        if (cancelled) return;
-        // Backend unreachable — full mock mode
-        setAgents(MOCK_AGENTS);
-        setLogs(generateMockLogs());
-        setConnected(false);
-        setMockMode(true);
-      }
-    }
-
-    bootstrap();
-    return () => { cancelled = true; };
-  }, []);
-
-  // ── Live polling: /recent + /stats every 3s (real backend) ──
-  useEffect(() => {
-    if (mockMode) return; // handled by mock interval below
-
-    const interval = setInterval(async () => {
+    async function poll() {
       try {
         const [recentData, statsData, agentsData] = await Promise.all([
-          apiFetch("/recent?limit=30"),
+          apiFetch("/recent?limit=50"),
           apiFetch("/stats"),
           apiFetch("/agents"),
         ]);
 
+        if (cancelled) return;
+
         setConnected(true);
         setStats(statsData);
+        setAgents(mapAgents(agentsData.agents));
 
-        // Update agents from backend
-        const backendAgents = (agentsData.agents || []).map((a) => ({
-          ...a,
-          name: AGENT_NAMES[a.agent_id] || a.agent_id,
-          status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
-          lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
-        }));
-        if (backendAgents.length > 0) setAgents(backendAgents);
-
-        // Find genuinely new entries
-        const newEntries = (recentData.decisions || [])
-          .filter((d) => {
-            const uid = d.id || `${d.agent_id}-${d.step_id}`;
-            return !seenIds.current.has(uid);
-          })
-          .map((d) => {
-            const uid = d.id || `${d.agent_id}-${d.step_id}`;
-            seenIds.current.add(uid);
-            return { ...d, isNew: true };
-          });
+        // Only add genuinely new entries
+        const newEntries = (recentData.decisions || []).filter((d) => {
+          const uid = d.id || `${d.agent_id}-${d.step_id}`;
+          if (seenIds.current.has(uid)) return false;
+          seenIds.current.add(uid);
+          return true;
+        }).map((d) => ({ ...d, isNew: true }));
 
         if (newEntries.length > 0) {
           setLogs((prev) => {
-            const updated = [...newEntries, ...prev].slice(0, 100);
             setTimeout(() => {
-              setLogs((l) => l.map((e) => newEntries.some((n) => n.id === e.id) ? { ...e, isNew: false } : e));
+              setLogs((l) =>
+                l.map((e) => newEntries.some((n) => n.id === e.id) ? { ...e, isNew: false } : e)
+              );
             }, 1000);
-            return updated;
+            return [...newEntries, ...prev].slice(0, 100);
           });
         }
       } catch {
-        setConnected(false);
+        if (!cancelled) setConnected(false);
       }
-    }, 3000);
+    }
 
-    return () => clearInterval(interval);
-  }, [mockMode]);
+    poll(); // immediate first fetch
+    const interval = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
 
-  // ── Mock interval: simulate events when backend is unreachable ──
-  useEffect(() => {
-    if (!mockMode) return;
-
-    const interval = setInterval(() => {
-      const runningAgents = MOCK_AGENTS.filter((a) => !localHalted.current.has(a.agent_id));
-      if (!runningAgents.length) return;
-
-      const agent = randomFrom(runningAgents);
-      const entry = makeMockEntry(agent.agent_id);
-
-      setLogs((prev) => {
-        setTimeout(() => {
-          setLogs((l) => l.map((e) => e.id === entry.id ? { ...e, isNew: false } : e));
-        }, 1000);
-        return [entry, ...prev].slice(0, 100);
-      });
-    }, randomInt(2000, 3000));
-
-    mockIntervalRef.current = interval;
-    return () => clearInterval(interval);
-  }, [mockMode]);
-
-  // ── Stop handler ──
+  // ── Stop handler ──────────────────────────────────────────────────────────
   const handleStop = useCallback(async (agentId) => {
     localHalted.current.add(agentId);
-
     setAgents((prev) =>
-      prev.map((a) => a.agent_id === agentId ? { ...a, status: "HALTED", lastDecision: "HALT" } : a)
+      prev.map((a) => a.agent_id === agentId ? { ...a, status: "HALTED" } : a)
     );
 
     const manualEntry = {
@@ -598,6 +457,7 @@ export default function AgentWatchDashboard() {
       timestamp: new Date().toISOString(),
       isNew: true,
     };
+    seenIds.current.add(manualEntry.id);
     setLogs((prev) => {
       setTimeout(() => {
         setLogs((l) => l.map((e) => e.id === manualEntry.id ? { ...e, isNew: false } : e));
@@ -607,16 +467,14 @@ export default function AgentWatchDashboard() {
 
     try {
       await fetch(`${API}/agent/${agentId}/halt`, { method: "POST" });
-    } catch {
-      // backend may not be running
-    }
+    } catch { /* backend may restart */ }
   }, []);
 
   return (
     <>
       <style>{styles}</style>
       <div className="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
-        <Sidebar agents={agents} onStop={handleStop} mockMode={mockMode} />
+        <Sidebar agents={agents} onStop={handleStop} connected={connected} />
         <CenterPanel logs={logs} connected={connected} stats={stats} />
         <RightPanel logs={logs} stats={stats} />
       </div>
