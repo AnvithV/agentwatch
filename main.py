@@ -258,3 +258,177 @@ async def demo_webhook_receiver(payload: dict):
 async def get_halt_signals():
     """View all HALT signals received by the demo webhook."""
     return {"signals": _halt_signals, "count": len(_halt_signals)}
+
+
+# ---------------------------------------------------------------------------
+# Policy Configuration API — Dynamic policy management
+# ---------------------------------------------------------------------------
+
+class PolicyUpdate(BaseModel):
+    budget_limit: Optional[int] = None
+    restricted_tickers: Optional[list[str]] = None
+    max_position_size: Optional[int] = None
+    allowed_actions: Optional[list[str]] = None
+
+
+# Store default policies for reset
+_DEFAULT_POLICIES = {
+    "budget_limit": 100_000,
+    "restricted_tickers": ["GME", "AMC", "BBBY"],
+    "max_position_size": 1000,
+    "allowed_actions": ["BUY", "SELL", "HOLD", "RESEARCH"],
+}
+
+
+@app.get("/api/v1/policies")
+async def get_policies():
+    """Get current policy configuration."""
+    return {
+        "policies": config.MOCK_POLICIES,
+        "description": {
+            "budget_limit": "Maximum single trade cost in USD",
+            "restricted_tickers": "Tickers that cannot be traded",
+            "max_position_size": "Maximum shares per trade",
+            "allowed_actions": "Permitted action types",
+        }
+    }
+
+
+@app.put("/api/v1/policies")
+async def update_policies(update: PolicyUpdate):
+    """Update policy configuration dynamically."""
+    changes = []
+
+    if update.budget_limit is not None:
+        old = config.MOCK_POLICIES["budget_limit"]
+        config.MOCK_POLICIES["budget_limit"] = update.budget_limit
+        changes.append(f"budget_limit: ${old:,} → ${update.budget_limit:,}")
+
+    if update.restricted_tickers is not None:
+        old = config.MOCK_POLICIES["restricted_tickers"]
+        config.MOCK_POLICIES["restricted_tickers"] = update.restricted_tickers
+        changes.append(f"restricted_tickers: {old} → {update.restricted_tickers}")
+
+    if update.max_position_size is not None:
+        old = config.MOCK_POLICIES["max_position_size"]
+        config.MOCK_POLICIES["max_position_size"] = update.max_position_size
+        changes.append(f"max_position_size: {old} → {update.max_position_size}")
+
+    if update.allowed_actions is not None:
+        old = config.MOCK_POLICIES["allowed_actions"]
+        config.MOCK_POLICIES["allowed_actions"] = update.allowed_actions
+        changes.append(f"allowed_actions: {old} → {update.allowed_actions}")
+
+    print(f"[Policy] Updated: {', '.join(changes)}")
+
+    return {
+        "status": "updated",
+        "changes": changes,
+        "current_policies": config.MOCK_POLICIES,
+    }
+
+
+@app.post("/api/v1/policies/reset")
+async def reset_policies():
+    """Reset policies to default values."""
+    for key, value in _DEFAULT_POLICIES.items():
+        config.MOCK_POLICIES[key] = value if not isinstance(value, list) else value.copy()
+
+    print("[Policy] Reset to defaults")
+    return {
+        "status": "reset",
+        "policies": config.MOCK_POLICIES,
+    }
+
+
+@app.post("/api/v1/policies/restricted-tickers/{ticker}")
+async def add_restricted_ticker(ticker: str):
+    """Add a ticker to the restricted list."""
+    ticker = ticker.upper()
+    if ticker not in config.MOCK_POLICIES["restricted_tickers"]:
+        config.MOCK_POLICIES["restricted_tickers"].append(ticker)
+        return {"status": "added", "ticker": ticker, "restricted_tickers": config.MOCK_POLICIES["restricted_tickers"]}
+    return {"status": "already_exists", "ticker": ticker}
+
+
+@app.delete("/api/v1/policies/restricted-tickers/{ticker}")
+async def remove_restricted_ticker(ticker: str):
+    """Remove a ticker from the restricted list."""
+    ticker = ticker.upper()
+    if ticker in config.MOCK_POLICIES["restricted_tickers"]:
+        config.MOCK_POLICIES["restricted_tickers"].remove(ticker)
+        return {"status": "removed", "ticker": ticker, "restricted_tickers": config.MOCK_POLICIES["restricted_tickers"]}
+    return {"status": "not_found", "ticker": ticker}
+
+
+# ---------------------------------------------------------------------------
+# Audit & Export — Compliance reporting
+# ---------------------------------------------------------------------------
+
+@app.get("/api/v1/agent/{agent_id}/export")
+async def export_agent_session(agent_id: str):
+    """
+    Export full agent session for audit/compliance.
+    Returns all steps, decisions, and summary stats.
+    """
+    from neo4j_driver import get_halted_steps
+
+    graph = await get_agent_graph(agent_id)
+    halts = await get_halted_steps(agent_id)
+
+    nodes = graph.get("nodes", [])
+
+    # Calculate summary
+    proceed_count = sum(1 for n in nodes if n.get("decision") == "PROCEED")
+    halt_count = sum(1 for n in nodes if n.get("decision") == "HALT")
+
+    # Group by reason
+    reasons = {}
+    for n in nodes:
+        reason = n.get("reason", "UNKNOWN")
+        reasons[reason] = reasons.get(reason, 0) + 1
+
+    return {
+        "agent_id": agent_id,
+        "export_timestamp": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total_steps": len(nodes),
+            "proceed_count": proceed_count,
+            "halt_count": halt_count,
+            "halt_rate": f"{halt_count/len(nodes)*100:.1f}%" if nodes else "0%",
+            "decisions_by_reason": reasons,
+        },
+        "halts": halts,
+        "full_trace": nodes,
+        "graph": graph,
+    }
+
+
+@app.get("/api/v1/compliance/report")
+async def compliance_report():
+    """
+    Generate overall compliance report across all agents.
+    Useful for audits and dashboards.
+    """
+    from neo4j_driver import get_stats, list_agents
+
+    stats = await get_stats()
+    agents = await list_agents()
+
+    total = stats.get("total_steps", 0)
+    halts = stats.get("halt_count", 0)
+
+    return {
+        "report_timestamp": datetime.now(timezone.utc).isoformat(),
+        "overall_compliance_rate": f"{(total-halts)/total*100:.1f}%" if total > 0 else "N/A",
+        "total_decisions": total,
+        "total_halts": halts,
+        "total_proceeds": stats.get("proceed_count", 0),
+        "violations_by_type": stats.get("violations_by_type", {}),
+        "agents_monitored": agents.get("count", 0),
+        "high_risk_agents": [
+            a for a in agents.get("agents", [])
+            if a.get("halt_count", 0) > 2
+        ],
+        "policies_active": config.MOCK_POLICIES,
+    }

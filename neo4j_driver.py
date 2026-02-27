@@ -408,3 +408,9 @@ async def list_agents() -> dict:
     """Returns list of all agents with their step counts."""
     driver = await get_driver()
     return await driver.list_agents()
+
+
+async def get_halted_steps(agent_id: str) -> list:
+    """Returns all HALT steps for an agent."""
+    driver = await get_driver()
+    return await driver.get_halted_steps(agent_id)
