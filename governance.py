@@ -1,349 +1,421 @@
 """
-Governance Pipeline — Person 1 owns this file.
-Fastino GLiNER 2 is live. Senso attempts real API, falls back to local policy engine.
-Modulate-inspired text safety check covers the text analysis layer.
+governance.py — AgentWatch Governance Pipeline (Person 1)
+
+Pipeline order (fail-closed):
+  1. Loop detection  (Person 2 — called from main.py before this module)
+  2. extract_entities()   — Fastino GLiNER
+  3. check_policy()       — Senso
+  4. check_safety()       — Modulate / keyword fallback
+  5. PROCEED if all pass, HALT on first failure
 """
 
-import json
 import re
+import logging
 from datetime import datetime, timezone
 
 import aiohttp
 
 import config
-from models import GovernanceDecision, TelemetryEvent
+from models import ExtractedEntities, GovernanceDecision
 
-# ---------------------------------------------------------------------------
-# Fallback mock policies — replace with real Senso calls when API is ready
-# ---------------------------------------------------------------------------
-MOCK_POLICIES = {
-    "budget_limit": 100_000,
-    "restricted_tickers": ["GME", "AMC", "BBBY"],
-    "max_position_size": 1000,
-    "allowed_actions": ["BUY", "SELL", "HOLD", "RESEARCH"],
+logger = logging.getLogger(__name__)
+
+# ─────────────────────────────────────────────
+# ANSI helpers for demo-friendly terminal output
+# ─────────────────────────────────────────────
+_GREEN = "\033[92m"
+_RED = "\033[91m"
+_YELLOW = "\033[93m"
+_CYAN = "\033[96m"
+_RESET = "\033[0m"
+
+
+def _log(icon: str, tag: str, msg: str, color: str = _CYAN) -> None:
+    print(f"{color}{icon} [{tag}] {msg}{_RESET}", flush=True)
+
+
+# ─────────────────────────────────────────────
+# 1. Entity Extraction  (Fastino GLiNER)
+# ─────────────────────────────────────────────
+
+_TOTAL_COST_RE = re.compile(
+    r"total\s+cost\s+\$?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE
+)
+_PRICE_RE = re.compile(
+    r"(?:cost|price|at)\s*\$?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE
+)
+_TICKER_RE = re.compile(r"\b([A-Z]{1,5})\b")
+_ACTION_RE = re.compile(r"\b(BUY|SELL|HOLD|RESEARCH|EXECUTE|RECOMMEND)\b", re.IGNORECASE)
+_QTY_RE = re.compile(r"\b(\d+)\s+shares?\b", re.IGNORECASE)
+_VENDOR_RE = re.compile(r"\b(?:vendor|supplier|provider)\s+[\"']?([A-Za-z0-9\s]+)[\"']?", re.IGNORECASE)
+
+_KNOWN_TICKERS = {
+    "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "TSLA", "META", "NVDA",
+    "NFLX", "AMD", "INTC", "GME", "AMC", "BBBY", "SPY", "QQQ",
 }
 
-# Safety keywords (fallback for Modulate)
-SAFETY_KEYWORDS = [
-    "guaranteed",
-    "you must",
-    "lose everything",
-    "act now",
-    "risk-free",
-    "100% return",
-]
+
+def _regex_extract(raw_log: str) -> dict:
+    """Fallback entity extraction using regex when Fastino is unavailable."""
+    entities: dict = {}
+
+    price_match = _TOTAL_COST_RE.search(raw_log) or _PRICE_RE.search(raw_log)
+    if price_match:
+        entities["price"] = float(price_match.group(1).replace(",", ""))
+
+    action_match = _ACTION_RE.search(raw_log)
+    if action_match:
+        entities["action_type"] = action_match.group(1).upper()
+
+    qty_match = _QTY_RE.search(raw_log)
+    if qty_match:
+        entities["quantity"] = int(qty_match.group(1))
+
+    ticker_candidates = set(_TICKER_RE.findall(raw_log))
+    known = ticker_candidates & _KNOWN_TICKERS
+    if known:
+        entities["ticker"] = next(iter(known))
+
+    vendor_match = _VENDOR_RE.search(raw_log)
+    if vendor_match:
+        entities["vendor"] = vendor_match.group(1).strip()
+
+    return entities
 
 
-# ---------------------------------------------------------------------------
-# Entity Extraction (Fastino GLiNER 2 API)
-# ---------------------------------------------------------------------------
-async def _fastino_extract(raw_log: str) -> dict:
-    """Calls the real Fastino GLiNER 2 API for entity extraction."""
+async def extract_entities(raw_log: str) -> dict:
+    """
+    Call Fastino GLiNER API to extract structured entities from raw_log.
+    Falls back to regex extraction on any API failure.
+
+    Returns dict with keys: price, action_type, ticker, quantity, vendor
+    """
+    if not config.FASTINO_API_KEY:
+        logger.warning("FASTINO_API_KEY not set — using regex fallback")
+        result = _regex_extract(raw_log)
+        _log("🔍", "Fastino", f"Regex extracted: {result}", _YELLOW)
+        return result
+
     payload = {
         "task": "extract_entities",
         "text": raw_log,
         "schema": ["total_cost", "unit_price", "action_type", "ticker", "quantity", "vendor"],
         "threshold": 0.3,
-        "include_confidence": True,
-        "include_spans": False,
-        "format_results": True,
     }
     headers = {
         "X-API-Key": config.FASTINO_API_KEY,
         "Content-Type": "application/json",
     }
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(config.FASTINO_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                config.FASTINO_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
 
-    result = data.get("result", {})
-    entities_raw = result.get("entities", {})
+        # Fastino response: {"result": {"entities": {"label": ["value", ...]}}}
+        raw_entities = data.get("result", {}).get("entities", {})
+        entities: dict = {}
 
-    # Helper: GLiNER returns either plain strings or {"text": ..., "confidence": ...} objects
-    def _get_text(item):
-        if isinstance(item, dict):
-            return item.get("text", "")
-        return str(item)
+        def first(key):
+            vals = raw_entities.get(key, [])
+            return vals[0] if vals else None
 
-    # Normalize GLiNER output into our flat entity dict
-    entities: dict = {}
+        total_cost = first("total_cost")
+        if total_cost:
+            cleaned = re.sub(r"[^\d.]", "", total_cost)
+            if cleaned:
+                entities["price"] = float(cleaned)
+        elif first("unit_price"):
+            cleaned = re.sub(r"[^\d.]", "", first("unit_price"))
+            if cleaned:
+                entities["price"] = float(cleaned)
 
-    # Prefer total_cost over unit_price for policy checks
-    for price_key in ["total_cost", "unit_price"]:
-        prices = entities_raw.get(price_key, [])
-        if prices:
-            price_str = _get_text(prices[0]).replace("$", "").replace(",", "")
-            price_match = re.search(r"[\d.]+", price_str)
-            if price_match:
-                entities["price"] = float(price_match.group())
-                break
+        if first("action_type"):
+            entities["action_type"] = first("action_type").upper()
+        if first("ticker"):
+            entities["ticker"] = first("ticker").upper()
+        if first("quantity"):
+            cleaned = re.sub(r"[^\d]", "", first("quantity"))
+            if cleaned:
+                entities["quantity"] = int(cleaned)
+        if first("vendor"):
+            entities["vendor"] = first("vendor")
 
-    actions = entities_raw.get("action_type", [])
-    if actions:
-        entities["action_type"] = _get_text(actions[0]).upper()
+        _log("🔍", "Fastino", f"GLiNER extracted: {entities}", _CYAN)
+        return entities
 
-    tickers = entities_raw.get("ticker", [])
-    if tickers:
-        entities["ticker"] = _get_text(tickers[0]).upper()
-
-    quantities = entities_raw.get("quantity", [])
-    if quantities:
-        qty_match = re.search(r"\d+", _get_text(quantities[0]))
-        if qty_match:
-            entities["quantity"] = int(qty_match.group())
-
-    vendors = entities_raw.get("vendor", [])
-    if vendors:
-        entities["vendor"] = _get_text(vendors[0])
-
-    return entities
-
-
-def _regex_fallback(raw_log: str) -> dict:
-    """Regex fallback if Fastino API is unavailable."""
-    entities: dict = {}
-
-    total_cost_match = re.search(r"total cost \$([\d,]+(?:\.\d{2})?)", raw_log, re.IGNORECASE)
-    if total_cost_match:
-        entities["price"] = float(total_cost_match.group(1).replace(",", ""))
-    else:
-        price_match = re.search(r"\$[\d,]+(?:\.\d{2})?", raw_log)
-        if price_match:
-            entities["price"] = float(price_match.group().replace("$", "").replace(",", ""))
-
-    action_match = re.search(r"\b(BUY|SELL|HOLD|RESEARCH)\b", raw_log, re.IGNORECASE)
-    if action_match:
-        entities["action_type"] = action_match.group().upper()
-
-    ticker_match = re.search(r"\b([A-Z]{1,5})\b", raw_log)
-    if ticker_match:
-        entities["ticker"] = ticker_match.group()
-
-    qty_match = re.search(r"(\d+)\s+shares", raw_log, re.IGNORECASE)
-    if qty_match:
-        entities["quantity"] = int(qty_match.group(1))
-
-    return entities
+    except Exception as exc:
+        logger.warning("Fastino API error (%s) — using regex fallback", exc)
+        result = _regex_extract(raw_log)
+        _log("🔍", "Fastino", f"Fallback extracted: {result}", _YELLOW)
+        return result
 
 
-async def extract_entities(raw_log: str) -> dict:
-    """Extracts entities via Fastino GLiNER 2 API, falls back to regex on failure."""
-    if config.FASTINO_API_KEY:
-        try:
-            entities = await _fastino_extract(raw_log)
-            print(f"  [Fastino] GLiNER extracted: {entities}")
-            return entities
-        except Exception as e:
-            print(f"  [Fastino] API error, using regex fallback: {e}")
+# ─────────────────────────────────────────────
+# 2. Policy Check  (Senso)
+# ─────────────────────────────────────────────
 
-    entities = _regex_fallback(raw_log)
-    print(f"  [Fastino] Regex fallback extracted: {entities}")
-    return entities
-
-
-# ---------------------------------------------------------------------------
-# Policy Check (Senso Context OS + local policy fallback)
-# ---------------------------------------------------------------------------
-async def _senso_policy_check(entities: dict, agent_id: str) -> dict:
-    """Queries Senso's search API to check entities against ingested policies."""
-    # Only query Senso when there's a real trade with concrete data
-    action = entities.get("action_type", "")
-    is_trade_action = action in ("BUY", "SELL")
-    has_price = entities.get("price") is not None
-    has_quantity = entities.get("quantity") is not None
-    has_ticker = entities.get("ticker") is not None
-    # Require a trade action AND concrete financial data (price or quantity)
-    if not (is_trade_action and (has_price or has_quantity)):
-        return {"compliant": True, "violation": None, "policy_limit": None}
-
-    # Build a focused compliance query
-    parts = []
+def _build_senso_query(entities: dict) -> str:
+    """Build a natural language policy query from extracted entities."""
+    parts = ["Is this agent action compliant with our trading policies?"]
+    if entities.get("action_type"):
+        parts.append(f"Action: {entities['action_type']}")
     if entities.get("ticker"):
-        parts.append(f"ticker {entities['ticker']}")
-    if entities.get("price"):
-        parts.append(f"total cost ${entities['price']:,.0f}")
+        parts.append(f"Ticker: {entities['ticker']}")
     if entities.get("quantity"):
-        parts.append(f"{entities['quantity']} shares")
+        parts.append(f"Quantity: {entities['quantity']} shares")
+    if entities.get("price"):
+        parts.append(f"Total cost: ${entities['price']:,.2f}")
+    if entities.get("vendor"):
+        parts.append(f"Vendor: {entities['vendor']}")
+    return " | ".join(parts)
 
-    query = f"Is this trade allowed? {', '.join(parts)}. Check budget limits, restricted tickers, and position size only."
 
+_VIOLATION_SIGNALS = re.compile(
+    r"\b(violat|not compliant|non.compliant|exceeds|prohibited|restricted|"
+    r"not allowed|unauthori[sz]ed|over budget|blocked|forbidden)\b",
+    re.IGNORECASE,
+)
+
+
+async def check_policy(entities: dict, agent_id: str) -> dict:
+    """
+    Query Senso semantic search to validate entities against org knowledge base.
+    Falls back to MOCK_POLICIES if Senso is unavailable.
+
+    Returns: {"compliant": bool, "violation": str | None, "policy_limit": value | None}
+    """
+    if not config.SENSO_API_KEY:
+        logger.warning("SENSO_API_KEY not set — using mock policy store")
+        return _mock_policy_check(entities)
+
+    query = _build_senso_query(entities)
+    payload = {"query": query, "max_results": 3}
     headers = {
         "X-API-Key": config.SENSO_API_KEY,
         "Content-Type": "application/json",
     }
-    payload = {"query": query, "max_results": 3}
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            config.SENSO_API_URL,
-            json=payload,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            resp.raise_for_status()
-            data = await resp.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                config.SENSO_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=8),
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
 
-    answer = data.get("answer", "").lower()
-    # Parse Senso's AI-generated answer for compliance signals
-    violation_signals = [
-        "not allowed", "halted", "halt", "exceeds", "violation", "not compliant",
-        "restricted", "prohibited", "denied", "over budget", "not permitted",
-        "may not", "must be halted",
-    ]
-    for signal in violation_signals:
-        if signal in answer:
-            return {
-                "compliant": False,
-                "violation": data.get("answer", "policy violation detected"),
-                "policy_limit": None,
-            }
+        answer = data.get("answer", "")
+        compliant = not bool(_VIOLATION_SIGNALS.search(answer))
+        violation = answer if not compliant else None
 
-    return {"compliant": True, "violation": None, "policy_limit": None}
-
-
-def _local_policy_check(entities: dict) -> dict:
-    """Local policy engine fallback when Senso is unavailable."""
-    # Budget check
-    price = entities.get("price")
-    if price is not None and price > MOCK_POLICIES["budget_limit"]:
-        return {
-            "compliant": False,
-            "violation": f"cost ${price:,.0f} exceeds budget ${MOCK_POLICIES['budget_limit']:,}",
-            "policy_limit": MOCK_POLICIES["budget_limit"],
-        }
-
-    # Restricted ticker check
-    ticker = entities.get("ticker")
-    if ticker and ticker in MOCK_POLICIES["restricted_tickers"]:
-        return {
-            "compliant": False,
-            "violation": f"ticker {ticker} is on restricted list",
+        result = {
+            "compliant": compliant,
+            "violation": violation,
             "policy_limit": None,
         }
+        label = "COMPLIANT" if compliant else f"VIOLATION — {answer[:120]}"
+        color = _CYAN if compliant else _RED
+        _log("📋", "Senso", f"Policy check via API: {label}", color)
+        return result
 
-    # Position size check
-    quantity = entities.get("quantity")
-    if quantity is not None and quantity > MOCK_POLICIES["max_position_size"]:
-        return {
+    except Exception as exc:
+        logger.warning("Senso API error (%s) — using mock policy store", exc)
+        return _mock_policy_check(entities)
+
+
+def _mock_policy_check(entities: dict) -> dict:
+    """Evaluate entities against MOCK_POLICIES."""
+    policies = config.MOCK_POLICIES
+
+    price = entities.get("price")
+    if price is not None and price > policies["budget_limit"]:
+        result = {
             "compliant": False,
-            "violation": f"quantity {quantity} exceeds max position size {MOCK_POLICIES['max_position_size']}",
-            "policy_limit": MOCK_POLICIES["max_position_size"],
+            "violation": f"cost ${price:,.2f} exceeds budget limit ${policies['budget_limit']:,}",
+            "policy_limit": policies["budget_limit"],
         }
+        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+        return result
 
+    ticker = entities.get("ticker")
+    if ticker and ticker in policies["restricted_tickers"]:
+        result = {
+            "compliant": False,
+            "violation": f"ticker {ticker} is on the restricted list",
+            "policy_limit": None,
+        }
+        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+        return result
+
+    qty = entities.get("quantity")
+    if qty is not None and qty > policies["max_position_size"]:
+        result = {
+            "compliant": False,
+            "violation": f"quantity {qty} exceeds max position size {policies['max_position_size']}",
+            "policy_limit": policies["max_position_size"],
+        }
+        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+        return result
+
+    action = entities.get("action_type")
+    if action and action not in policies["allowed_actions"]:
+        result = {
+            "compliant": False,
+            "violation": f"action '{action}' is not in allowed actions",
+            "policy_limit": None,
+        }
+        _log("📋", "Senso", f"Local policy check: VIOLATION — {result['violation']}", _YELLOW)
+        return result
+
+    _log("📋", "Senso", "Policy check via API: COMPLIANT", _CYAN)
     return {"compliant": True, "violation": None, "policy_limit": None}
 
 
-async def check_policy(entities: dict, agent_id: str) -> dict:
-    """Checks policy via Senso API, falls back to local policy engine."""
-    if config.SENSO_API_KEY and config.SENSO_API_URL:
-        try:
-            result = await _senso_policy_check(entities, agent_id)
-            print(f"  [Senso] Policy check via API: {'COMPLIANT' if result['compliant'] else 'VIOLATION'}")
-            return result
-        except Exception as e:
-            print(f"  [Senso] API error, using local policy engine: {e}")
+# ─────────────────────────────────────────────
+# 3. Safety Check  (Modulate — keyword-based)
+# Note: Modulate is SDK-only (no REST API); using keyword pattern matching
+# ─────────────────────────────────────────────
 
-    result = _local_policy_check(entities)
-    print(f"  [Senso] Local policy check: {'COMPLIANT' if result['compliant'] else 'VIOLATION'}")
+_TOXIC_PATTERNS = re.compile(
+    r"\b(guaranteed|must buy|you will lose everything|100%\s*certain|"
+    r"pump|dump|manipulat|coerce|deceive|deceptive|aggressive|threaten)\b",
+    re.IGNORECASE,
+)
+_URGENCY_PATTERN = re.compile(
+    r"\b(NOW|IMMEDIATELY|urgent|act fast|limited time|don'?t miss)\b",
+    re.IGNORECASE,
+)
+
+
+async def check_safety(thought: str) -> dict:
+    """
+    Analyze agent thought for safety violations via keyword pattern matching.
+    Modulate is SDK-only — this covers the text safety layer.
+
+    Returns: {"safe": bool, "flags": list[str]}
+    """
+    return _keyword_safety_check(thought)
+
+
+def _keyword_safety_check(thought: str) -> dict:
+    flags = []
+    if _TOXIC_PATTERNS.search(thought):
+        flags.append("toxic_language")
+    if _URGENCY_PATTERN.search(thought):
+        flags.append("manipulative_urgency")
+
+    result = {"safe": len(flags) == 0, "flags": flags}
+    label = "SAFE" if result["safe"] else f"VIOLATION — {flags}"
+    color = _CYAN if result["safe"] else _YELLOW
+    _log("🛡️", "Modulate", f"Safety check: {label}", color)
     return result
 
 
-# ---------------------------------------------------------------------------
-# Safety Check (Modulate-inspired text safety analysis)
-# ---------------------------------------------------------------------------
-async def check_safety(thought: str) -> dict:
-    """
-    Text safety check inspired by Modulate's voice safety categories.
-    Detects aggression, deception, coercion, and manipulation in agent output.
-    Modulate integration is voice-SDK based; this covers the text analysis layer.
-    """
-    thought_lower = thought.lower()
-    flags = [kw for kw in SAFETY_KEYWORDS if kw in thought_lower]
-    print(f"  [Modulate] Safety check: {'SAFE' if not flags else f'FLAGGED {flags}'}")
-    return {"safe": len(flags) == 0, "flags": flags}
+# ─────────────────────────────────────────────
+# 4. Governance Pipeline Orchestrator
+# ─────────────────────────────────────────────
 
-
-# ---------------------------------------------------------------------------
-# Orchestrator — runs the full governance pipeline
-# ---------------------------------------------------------------------------
 async def run_governance_pipeline(telemetry: dict) -> GovernanceDecision:
     """
-    Runs all governance checks in order. Fail-closed: if any check errors, default to HALT.
+    Orchestrate the full governance pipeline for a telemetry event.
+
+    Pipeline (fail-closed — first HALT wins):
+      1. Loop detection   — handled upstream in main.py (Person 2)
+      2. extract_entities — Fastino
+      3. check_policy     — Senso
+      4. check_safety     — Modulate
+
+    Returns a GovernanceDecision.
     """
     agent_id = telemetry["agent_id"]
     step_id = telemetry["step_id"]
+    raw_log = telemetry.get("raw_log", "")
+    thought = telemetry.get("thought", "")
 
-    # 1. Extract entities from raw_log via Fastino
-    try:
-        entities = await extract_entities(telemetry.get("raw_log", ""))
-    except Exception:
+    _log("⏳", agent_id, f'Step received: "{thought[:80]}"', _CYAN)
+
+    now = datetime.now(timezone.utc)
+
+    def _halt(reason: str, details: str, triggered_by: str) -> GovernanceDecision:
+        _log("🛑", "AgentWatch", f"Decision: HALT — {reason}", _RED)
         return GovernanceDecision(
             agent_id=agent_id,
             step_id=step_id,
             decision="HALT",
-            reason="POLICY_VIOLATION",
-            details="Entity extraction failed — fail-closed",
-            triggered_by="fastino_extraction",
-            timestamp=datetime.now(timezone.utc),
+            reason=reason,
+            details=details,
+            triggered_by=triggered_by,
+            timestamp=now,
         )
 
-    # 2. Policy check via Senso
+    def _proceed() -> GovernanceDecision:
+        _log("✅", "AgentWatch", "Decision: PROCEED", _GREEN)
+        return GovernanceDecision(
+            agent_id=agent_id,
+            step_id=step_id,
+            decision="PROCEED",
+            reason="APPROVED",
+            details="All governance checks passed",
+            triggered_by="governance_pipeline",
+            timestamp=now,
+        )
+
+    # ── Step 1: Entity extraction (Fastino) ──────────────────────────────────
+    try:
+        entities = await extract_entities(raw_log)
+    except Exception as exc:
+        logger.error("extract_entities failed: %s", exc)
+        return _halt(
+            "FACT_CHECK_FAILED",
+            f"Entity extraction error: {exc}",
+            "fastino_extract",
+        )
+
+    # ── Step 2: Policy check (Senso) ─────────────────────────────────────────
     try:
         policy_result = await check_policy(entities, agent_id)
-        if not policy_result["compliant"]:
-            return GovernanceDecision(
-                agent_id=agent_id,
-                step_id=step_id,
-                decision="HALT",
-                reason="POLICY_VIOLATION",
-                details=policy_result["violation"],
-                triggered_by="senso_policy_check",
-                timestamp=datetime.now(timezone.utc),
-            )
-    except Exception:
-        return GovernanceDecision(
-            agent_id=agent_id,
-            step_id=step_id,
-            decision="HALT",
-            reason="POLICY_VIOLATION",
-            details="Policy check failed — fail-closed",
-            triggered_by="senso_policy_check",
-            timestamp=datetime.now(timezone.utc),
+    except Exception as exc:
+        logger.error("check_policy failed: %s", exc)
+        return _halt(
+            "POLICY_VIOLATION",
+            f"Policy check error: {exc}",
+            "senso_policy_check",
         )
 
-    # 3. Safety check via Modulate
+    if not policy_result.get("compliant", True):
+        violation = policy_result.get("violation", "unknown policy violation")
+        limit = policy_result.get("policy_limit")
+        details = f"{violation}"
+        if limit is not None:
+            details += f" (limit: {limit})"
+        return _halt("POLICY_VIOLATION", details, "senso_policy_check")
+
+    # ── Step 3: Safety check (Modulate) ──────────────────────────────────────
     try:
-        safety_result = await check_safety(telemetry.get("thought", ""))
-        if not safety_result["safe"]:
-            return GovernanceDecision(
-                agent_id=agent_id,
-                step_id=step_id,
-                decision="HALT",
-                reason="SAFETY_VIOLATION",
-                details=f"Unsafe language detected: {safety_result['flags']}",
-                triggered_by="modulate_safety_check",
-                timestamp=datetime.now(timezone.utc),
-            )
-    except Exception:
-        return GovernanceDecision(
-            agent_id=agent_id,
-            step_id=step_id,
-            decision="HALT",
-            reason="SAFETY_VIOLATION",
-            details="Safety check failed — fail-closed",
-            triggered_by="modulate_safety_check",
-            timestamp=datetime.now(timezone.utc),
+        safety_result = await check_safety(thought)
+    except Exception as exc:
+        logger.error("check_safety failed: %s", exc)
+        return _halt(
+            "SAFETY_VIOLATION",
+            f"Safety check error: {exc}",
+            "modulate_safety_check",
         )
 
-    # All checks passed
-    return GovernanceDecision(
-        agent_id=agent_id,
-        step_id=step_id,
-        decision="PROCEED",
-        reason="APPROVED",
-        details="All governance checks passed",
-        triggered_by="governance_pipeline",
-        timestamp=datetime.now(timezone.utc),
-    )
+    if not safety_result.get("safe", True):
+        flags = safety_result.get("flags", [])
+        return _halt(
+            "SAFETY_VIOLATION",
+            f"Safety flags detected: {', '.join(flags)}",
+            "modulate_safety_check",
+        )
+
+    return _proceed()

@@ -25,3 +25,11 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
 # AgentWatch Server
 AGENTWATCH_HOST = os.getenv("AGENTWATCH_HOST", "http://localhost:8000")
+
+# Mock policy store (fallback if Senso is unavailable)
+MOCK_POLICIES = {
+    "budget_limit": 100_000,
+    "restricted_tickers": ["GME", "AMC", "BBBY"],
+    "max_position_size": 1000,
+    "allowed_actions": ["BUY", "SELL", "HOLD", "RESEARCH"],
+}

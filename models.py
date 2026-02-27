@@ -18,7 +18,7 @@ class GovernanceDecision(BaseModel):
     agent_id: str
     step_id: str
     decision: str  # "HALT" or "PROCEED"
-    reason: str  # POLICY_VIOLATION, LOOP_DETECTED, SAFETY_VIOLATION, FACT_CHECK_FAILED, APPROVED
+    reason: str  # POLICY_VIOLATION | LOOP_DETECTED | SAFETY_VIOLATION | FACT_CHECK_FAILED | APPROVED
     details: str
     triggered_by: str
     timestamp: datetime
