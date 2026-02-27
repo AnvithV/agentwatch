@@ -280,7 +280,7 @@ async def demo_scenario_5_safety_violation(client: httpx.AsyncClient):
 async def demo_scenario_6_dynamic_policy(client: httpx.AsyncClient):
     """Scenario 6: Change policy mid-demo — show real-time policy updates."""
     section("SCENARIO 6: Dynamic Policy Change — Real-time Restriction")
-    print(f"  {DIM}Demo: Buy NVDA (allowed), admin restricts it, then get blocked{RESET}\n")
+    print(f"  {DIM}Demo: Buy NVDA (allowed), YOU add it to restricted, then get blocked{RESET}\n")
 
     agent = DemoAgent("demo-policy-001", "NvidiaFan")
 
@@ -294,21 +294,20 @@ async def demo_scenario_6_dynamic_policy(client: httpx.AsyncClient):
         observation="Order executed successfully",
         raw_log="Agent decided to BUY 50 shares of NVDA at $950, total cost $47,500",
     )
-    await asyncio.sleep(1.5)
 
-    # Step 2: Admin restricts NVDA mid-session
+    # Step 2: Wait for presenter to add NVDA to restricted list via dashboard
     print(f"\n  {YELLOW}{'─' * 50}{RESET}")
-    print(f"  {MAGENTA}{BOLD}[ADMIN ACTION] Compliance team restricts NVDA trading!{RESET}")
-    print(f"  {MAGENTA}  └─ Reason: Insider trading investigation announced{RESET}")
-    resp = await client.post(f"{API_BASE}/api/v1/policies/restricted-tickers/NVDA")
-    result = resp.json()
-    print(f"  {MAGENTA}  └─ Policy updated: {result['restricted_tickers']}{RESET}")
-    print(f"  {YELLOW}{'─' * 50}{RESET}\n")
+    print(f"  {MAGENTA}{BOLD}>>> ADD NVDA TO RESTRICTED LIST NOW! (5 seconds) <<<{RESET}")
+    print(f"  {MAGENTA}    Dashboard → Policies tab → type NVDA → click +{RESET}")
+    print(f"  {YELLOW}{'─' * 50}{RESET}")
 
-    await asyncio.sleep(1.5)
+    for i in range(5, 0, -1):
+        print(f"  {YELLOW}  Continuing in {i}...{RESET}", end='\r')
+        await asyncio.sleep(1)
+    print(f"  {YELLOW}  Continuing now!   {RESET}")
 
-    # Step 3: Agent tries to buy more NVDA — now blocked!
-    print(f"  {CYAN}[Phase 2] Agent tries to buy more NVDA...{RESET}\n")
+    # Step 3: Agent tries to buy more NVDA — should be blocked if you added it!
+    print(f"\n  {CYAN}[Phase 2] Agent tries to buy more NVDA...{RESET}\n")
     await agent.send_step(
         client,
         thought="NVDA dipped, great opportunity to add to my position",
@@ -317,10 +316,6 @@ async def demo_scenario_6_dynamic_policy(client: httpx.AsyncClient):
         observation="Order prepared",
         raw_log="Agent decided to BUY 100 shares of NVDA at $920, total cost $92,000",
     )
-
-    # Cleanup: Remove NVDA from restricted
-    print(f"\n  {DIM}[Cleanup] Removing NVDA from restricted list...{RESET}")
-    await client.delete(f"{API_BASE}/api/v1/policies/restricted-tickers/NVDA")
 
     print(f"\n  {MAGENTA}✓ Scenario 6 complete — Same ticker: PROCEED → policy change → HALT{RESET}")
 
