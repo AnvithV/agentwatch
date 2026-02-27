@@ -74,6 +74,8 @@ class Neo4jDriver:
     async def log_step(self, telemetry: dict, decision: dict) -> None:
         """
         Write an AgentStep node to Neo4j with telemetry + decision data.
+        If telemetry contains a parent_step_id from a different agent,
+        creates an INFLUENCES edge between the parent step and this step.
         Falls back to in-memory if Neo4j unavailable.
         """
         # Convert timestamp to ISO string if it's a datetime object
@@ -105,10 +107,12 @@ class Neo4jDriver:
         if self.driver and _neo4j_available:
             try:
                 async with self.driver.session() as session:
+                    # Write the step node and link to its agent
                     query = """
                     MERGE (a:Agent {agent_id: $agent_id})
                     CREATE (s:AgentStep {
                         step_id: $step_id,
+                        agent_id: $agent_id,
                         timestamp: datetime($timestamp),
                         thought: $thought,
                         tool_used: $tool_used,
@@ -133,6 +137,33 @@ class Neo4jDriver:
                     result = await session.run(query, step_data)
                     record = await result.single()
                     print(f"[Neo4j] Logged step: {record['step_id']}")
+
+                    # Create cross-agent INFLUENCES edge if parent_step_id is set
+                    parent_step_id = telemetry.get("parent_step_id")
+                    if parent_step_id:
+                        influence_query = """
+                        MATCH (parent:AgentStep {step_id: $parent_step_id})
+                        MATCH (child:AgentStep {step_id: $child_step_id})
+                        WHERE parent.agent_id <> child.agent_id
+                        MERGE (parent)-[:INFLUENCES {
+                            timestamp: datetime($timestamp),
+                            child_agent_id: $child_agent_id,
+                            child_decision: $child_decision
+                        }]->(child)
+                        RETURN parent.agent_id AS from_agent, child.agent_id AS to_agent
+                        """
+                        inf_result = await session.run(influence_query, {
+                            "parent_step_id": parent_step_id,
+                            "child_step_id": telemetry.get("step_id"),
+                            "timestamp": timestamp,
+                            "child_agent_id": telemetry.get("agent_id"),
+                            "child_decision": decision.get("decision", ""),
+                        })
+                        inf_record = await inf_result.single()
+                        if inf_record:
+                            print(f"[Neo4j] INFLUENCES edge: {inf_record['from_agent']} → {inf_record['to_agent']}")
+                        else:
+                            print(f"[Neo4j] INFLUENCES edge skipped — parent_step_id {parent_step_id} not found or same agent")
                     return
             except Exception as e:
                 print(f"[Neo4j] Write failed, using fallback: {e}")
@@ -307,6 +338,109 @@ class Neo4jDriver:
             {"thought": s["thought"], "reason": s["reason"], "timestamp": s["timestamp"]}
             for s in steps if s["decision"] == "HALT"
         ]
+
+    async def get_cross_agent_graph(self) -> dict:
+        """
+        Return all cross-agent INFLUENCES edges and the steps they connect.
+        Shows causal chains where one agent's output triggered another agent's action.
+        """
+        if self.driver and _neo4j_available:
+            try:
+                async with self.driver.session() as session:
+                    query = """
+                    MATCH (parent:AgentStep)-[inf:INFLUENCES]->(child:AgentStep)
+                    RETURN
+                        parent.step_id   AS from_step_id,
+                        parent.agent_id  AS from_agent,
+                        parent.thought   AS from_thought,
+                        parent.tool_used AS from_tool,
+                        parent.decision  AS from_decision,
+                        toString(parent.timestamp) AS from_timestamp,
+                        child.step_id    AS to_step_id,
+                        child.agent_id   AS to_agent,
+                        child.thought    AS to_thought,
+                        child.tool_used  AS to_tool,
+                        child.decision   AS to_decision,
+                        toString(child.timestamp)  AS to_timestamp,
+                        toString(inf.timestamp)    AS edge_timestamp
+                    ORDER BY inf.timestamp
+                    """
+                    result = await session.run(query)
+                    records = await result.data()
+
+                    nodes = {}
+                    edges = []
+                    for r in records:
+                        nodes[r["from_step_id"]] = {
+                            "id": r["from_step_id"],
+                            "agent_id": r["from_agent"],
+                            "thought": r["from_thought"],
+                            "tool_used": r["from_tool"],
+                            "decision": r["from_decision"],
+                            "timestamp": r["from_timestamp"],
+                        }
+                        nodes[r["to_step_id"]] = {
+                            "id": r["to_step_id"],
+                            "agent_id": r["to_agent"],
+                            "thought": r["to_thought"],
+                            "tool_used": r["to_tool"],
+                            "decision": r["to_decision"],
+                            "timestamp": r["to_timestamp"],
+                        }
+                        edges.append({
+                            "source": r["from_step_id"],
+                            "target": r["to_step_id"],
+                            "from_agent": r["from_agent"],
+                            "to_agent": r["to_agent"],
+                            "type": "INFLUENCES",
+                            "timestamp": r["edge_timestamp"],
+                        })
+
+                    return {
+                        "nodes": list(nodes.values()),
+                        "edges": edges,
+                        "agent_count": len({n["agent_id"] for n in nodes.values()}),
+                        "influence_count": len(edges),
+                    }
+            except Exception as e:
+                print(f"[Neo4j] Cross-agent graph query failed: {e}")
+
+        # Fallback: scan in-memory steps for parent_step_id references
+        nodes = {}
+        edges = []
+        all_steps = {
+            s["step_id"]: s
+            for steps in _fallback_steps.values()
+            for s in steps
+        }
+        for step in all_steps.values():
+            parent_id = step.get("parent_step_id")
+            if parent_id and parent_id in all_steps:
+                parent = all_steps[parent_id]
+                if parent["agent_id"] != step["agent_id"]:
+                    for node in (parent, step):
+                        nodes[node["step_id"]] = {
+                            "id": node["step_id"],
+                            "agent_id": node["agent_id"],
+                            "thought": node["thought"],
+                            "tool_used": node["tool_used"],
+                            "decision": node["decision"],
+                            "timestamp": node["timestamp"],
+                        }
+                    edges.append({
+                        "source": parent_id,
+                        "target": step["step_id"],
+                        "from_agent": parent["agent_id"],
+                        "to_agent": step["agent_id"],
+                        "type": "INFLUENCES",
+                        "timestamp": step["timestamp"],
+                    })
+        return {
+            "nodes": list(nodes.values()),
+            "edges": edges,
+            "agent_count": len({n["agent_id"] for n in nodes.values()}),
+            "influence_count": len(edges),
+        }
 
     async def clear_agent_data(self, agent_id: str) -> None:
         """Clear all data for an agent (useful for testing)."""

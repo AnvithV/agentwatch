@@ -12,7 +12,7 @@ from pydantic import BaseModel
 import config
 from models import TelemetryEvent, GovernanceDecision
 from governance import run_governance_pipeline, extract_entities, check_policy
-from neo4j_driver import log_step, check_for_loops, get_agent_graph
+from neo4j_driver import log_step, check_for_loops, get_agent_graph, get_cross_agent_graph
 
 # ---------------------------------------------------------------------------
 # Webhook Registry — stores callback URLs for agents
@@ -253,9 +253,7 @@ async def get_cross_agent_graph_endpoint():
     Get full multi-agent graph with INFLUENCES edges.
     Shows causal chains: ResearchAgent → INFLUENCES → TradeAgent → INFLUENCES → RiskAgent
     """
-    from neo4j_driver import get_cross_agent_graph
-    graph = await get_cross_agent_graph()
-    return graph
+    return await get_cross_agent_graph()
 
 
 async def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry: dict):
@@ -274,6 +272,7 @@ async def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, tele
         "timestamp": decision.timestamp.isoformat(),
         "warnings": getattr(decision, 'warnings', []),
         "severity": getattr(decision, 'severity', 'info'),
+        "parent_step_id": telemetry.get("parent_step_id"),
     }
     _recent_decisions.appendleft(decision_data)
 
