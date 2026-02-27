@@ -98,7 +98,7 @@ async def _fire_webhook(agent_id: str, decision: GovernanceDecision):
         print(f"[Webhook] Error: {e}")
 
 TRADING_POLICIES = """
-AgentWatch Trading Policy Document
+Argus Trading Policy Document
 
 1. Budget Limits:
    - Maximum single trade cost: $100,000
@@ -173,7 +173,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(title="AgentWatch", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Argus", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

@@ -237,12 +237,15 @@ class Neo4jDriver:
     async def get_agent_graph(self, agent_id: str) -> dict:
         """
         Return nodes + edges for the reasoning graph of a given agent.
+        Includes cross-agent INFLUENCES edges and nodes from other agents
+        that influence or are influenced by this agent.
         Format suitable for visualization.
         """
         # Try Neo4j first
         if self.driver and _neo4j_available:
             try:
                 async with self.driver.session() as session:
+                    # First get the agent's own steps
                     query = """
                     MATCH (a:Agent {agent_id: $agent_id})-[:HAS_STEP]->(s:AgentStep)
                     OPTIONAL MATCH (s)-[:NEXT]->(next:AgentStep)
@@ -252,6 +255,7 @@ class Neo4jDriver:
                         a.agent_id AS agent_id,
                         collect(DISTINCT {
                             id: s.step_id,
+                            agent_id: a.agent_id,
                             thought: s.thought,
                             tool_used: s.tool_used,
                             input_parameters: s.input_parameters,
@@ -270,13 +274,70 @@ class Neo4jDriver:
                     record = await result.single()
 
                     if not record:
-                        return {"agent_id": agent_id, "nodes": [], "edges": []}
+                        return {"agent_id": agent_id, "nodes": [], "edges": [], "cross_agent_nodes": [], "influences": []}
 
                     edges = [e for e in record["edges"] if e is not None]
+
+                    # Now get cross-agent INFLUENCES edges
+                    cross_query = """
+                    MATCH (a:Agent {agent_id: $agent_id})-[:HAS_STEP]->(s:AgentStep)
+                    OPTIONAL MATCH (parent:AgentStep)-[inf:INFLUENCES]->(s)
+                    WHERE parent.agent_id <> $agent_id
+                    OPTIONAL MATCH (s)-[inf2:INFLUENCES]->(child:AgentStep)
+                    WHERE child.agent_id <> $agent_id
+                    WITH s, parent, child
+                    WHERE parent IS NOT NULL OR child IS NOT NULL
+                    RETURN
+                        collect(DISTINCT CASE WHEN parent IS NOT NULL THEN {
+                            id: parent.step_id,
+                            agent_id: parent.agent_id,
+                            thought: parent.thought,
+                            tool_used: parent.tool_used,
+                            decision: parent.decision,
+                            reason: parent.reason,
+                            timestamp: toString(parent.timestamp),
+                            is_external: true
+                        } ELSE NULL END) AS incoming_nodes,
+                        collect(DISTINCT CASE WHEN child IS NOT NULL THEN {
+                            id: child.step_id,
+                            agent_id: child.agent_id,
+                            thought: child.thought,
+                            tool_used: child.tool_used,
+                            decision: child.decision,
+                            reason: child.reason,
+                            timestamp: toString(child.timestamp),
+                            is_external: true
+                        } ELSE NULL END) AS outgoing_nodes,
+                        collect(DISTINCT CASE WHEN parent IS NOT NULL THEN {
+                            source: parent.step_id,
+                            target: s.step_id,
+                            source_agent: parent.agent_id,
+                            target_agent: s.agent_id,
+                            type: "INFLUENCES"
+                        } ELSE NULL END) AS incoming_edges,
+                        collect(DISTINCT CASE WHEN child IS NOT NULL THEN {
+                            source: s.step_id,
+                            target: child.step_id,
+                            source_agent: s.agent_id,
+                            target_agent: child.agent_id,
+                            type: "INFLUENCES"
+                        } ELSE NULL END) AS outgoing_edges
+                    """
+                    cross_result = await session.run(cross_query, {"agent_id": agent_id})
+                    cross_record = await cross_result.single()
+
+                    cross_agent_nodes = []
+                    influences = []
+                    if cross_record:
+                        cross_agent_nodes = [n for n in (cross_record.get("incoming_nodes", []) + cross_record.get("outgoing_nodes", [])) if n is not None]
+                        influences = [e for e in (cross_record.get("incoming_edges", []) + cross_record.get("outgoing_edges", [])) if e is not None]
+
                     return {
                         "agent_id": record["agent_id"],
                         "nodes": record["nodes"],
-                        "edges": edges
+                        "edges": edges,
+                        "cross_agent_nodes": cross_agent_nodes,
+                        "influences": influences
                     }
             except Exception as e:
                 print(f"[Neo4j] Graph query failed, using fallback: {e}")
@@ -297,6 +358,7 @@ class Neo4jDriver:
         nodes = [
             {
                 "id": s["step_id"],
+                "agent_id": agent_id,
                 "thought": s["thought"],
                 "tool_used": s["tool_used"],
                 "input_parameters": s["input_parameters"],
@@ -312,7 +374,52 @@ class Neo4jDriver:
             {"source": final_steps[i]["step_id"], "target": final_steps[i+1]["step_id"], "type": "NEXT"}
             for i in range(len(final_steps) - 1)
         ]
-        return {"agent_id": agent_id, "nodes": nodes, "edges": edges}
+
+        # Find cross-agent INFLUENCES edges involving this agent
+        cross_agent_nodes = []
+        influences = []
+        my_step_ids = {s["step_id"] for s in final_steps}
+
+        # Build lookup of all steps across all agents
+        all_steps_map = {}
+        for aid, agent_steps in _fallback_steps.items():
+            for s in agent_steps:
+                if s["decision"] != "PENDING":
+                    all_steps_map[s["step_id"]] = {**s, "agent_id": aid}
+
+        for inf in _fallback_influences:
+            # Check if this agent is source or target of the INFLUENCES edge
+            if inf["source_agent_id"] == agent_id or inf["target_agent_id"] == agent_id:
+                influences.append({
+                    "source": inf["source_step_id"],
+                    "target": inf["target_step_id"],
+                    "source_agent": inf["source_agent_id"],
+                    "target_agent": inf["target_agent_id"],
+                    "type": "INFLUENCES"
+                })
+                # Add the external node
+                external_step_id = inf["source_step_id"] if inf["target_agent_id"] == agent_id else inf["target_step_id"]
+                external_agent_id = inf["source_agent_id"] if inf["target_agent_id"] == agent_id else inf["target_agent_id"]
+                if external_step_id in all_steps_map:
+                    ext_step = all_steps_map[external_step_id]
+                    cross_agent_nodes.append({
+                        "id": ext_step["step_id"],
+                        "agent_id": external_agent_id,
+                        "thought": ext_step["thought"],
+                        "tool_used": ext_step["tool_used"],
+                        "decision": ext_step["decision"],
+                        "reason": ext_step.get("reason", ""),
+                        "timestamp": ext_step["timestamp"],
+                        "is_external": True
+                    })
+
+        return {
+            "agent_id": agent_id,
+            "nodes": nodes,
+            "edges": edges,
+            "cross_agent_nodes": cross_agent_nodes,
+            "influences": influences
+        }
 
     async def get_halted_steps(self, agent_id: str) -> list:
         """Get all HALTed steps for an agent (useful for debugging)."""
