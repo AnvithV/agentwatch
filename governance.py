@@ -214,7 +214,32 @@ async def check_policy(entities: dict, agent_id: str) -> dict:
                 data = await resp.json()
 
         answer = data.get("answer", "")
-        compliant = not bool(_VIOLATION_SIGNALS.search(answer))
+        # Check for explicit compliance markers first (case-insensitive)
+        answer_lower = answer.lower()
+
+        # First check for explicit non-compliance (these take priority)
+        has_non_compliant = (
+            "non-compliant" in answer_lower or
+            "not compliant" in answer_lower or
+            "**violation**" in answer_lower or
+            "**non-compliant**" in answer_lower
+        )
+
+        # Then check for explicit compliance markers (flexible matching)
+        # Matches: "**compliant**", "**Yes — compliant.**", "compliant", "yes, compliant", etc.
+        has_compliant = (
+            "compliant" in answer_lower and
+            "non-compliant" not in answer_lower and
+            "not compliant" not in answer_lower
+        )
+
+        if has_non_compliant:
+            compliant = False
+        elif has_compliant:
+            compliant = True
+        else:
+            # Fall back to violation signal detection only if no explicit markers
+            compliant = not bool(_VIOLATION_SIGNALS.search(answer))
         violation = answer if not compliant else None
 
         result = {

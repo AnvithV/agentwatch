@@ -278,35 +278,51 @@ async def demo_scenario_5_safety_violation(client: httpx.AsyncClient):
 
 
 async def demo_scenario_6_dynamic_policy(client: httpx.AsyncClient):
-    """Scenario 6: Change policy mid-demo."""
-    section("SCENARIO 6: Dynamic Policy Change")
-    print(f"  {DIM}Demo: Add NVDA to restricted list, then try to trade it{RESET}\n")
-
-    # Add NVDA to restricted list
-    print(f"  {MAGENTA}[Admin] Adding NVDA to restricted tickers...{RESET}")
-    resp = await client.post(f"{API_BASE}/api/v1/policies/restricted-tickers/NVDA")
-    result = resp.json()
-    print(f"  {MAGENTA}[Admin] {result}{RESET}\n")
-
-    await asyncio.sleep(1)
+    """Scenario 6: Change policy mid-demo — show real-time policy updates."""
+    section("SCENARIO 6: Dynamic Policy Change — Real-time Restriction")
+    print(f"  {DIM}Demo: Buy NVDA (allowed), admin restricts it, then get blocked{RESET}\n")
 
     agent = DemoAgent("demo-policy-001", "NvidiaFan")
 
-    # Now try to trade NVDA
+    # Step 1: Buy NVDA successfully (it's currently allowed)
+    print(f"  {CYAN}[Phase 1] NVDA is currently ALLOWED...{RESET}\n")
     await agent.send_step(
         client,
-        thought="NVDA is the future of AI, I need to buy",
+        thought="NVDA is the future of AI, let me buy some shares",
         tool="execute_trade",
         params={"action": "BUY", "ticker": "NVDA", "quantity": 50},
+        observation="Order executed successfully",
+        raw_log="Agent decided to BUY 50 shares of NVDA at $950, total cost $47,500",
+    )
+    await asyncio.sleep(1.5)
+
+    # Step 2: Admin restricts NVDA mid-session
+    print(f"\n  {YELLOW}{'─' * 50}{RESET}")
+    print(f"  {MAGENTA}{BOLD}[ADMIN ACTION] Compliance team restricts NVDA trading!{RESET}")
+    print(f"  {MAGENTA}  └─ Reason: Insider trading investigation announced{RESET}")
+    resp = await client.post(f"{API_BASE}/api/v1/policies/restricted-tickers/NVDA")
+    result = resp.json()
+    print(f"  {MAGENTA}  └─ Policy updated: {result['restricted_tickers']}{RESET}")
+    print(f"  {YELLOW}{'─' * 50}{RESET}\n")
+
+    await asyncio.sleep(1.5)
+
+    # Step 3: Agent tries to buy more NVDA — now blocked!
+    print(f"  {CYAN}[Phase 2] Agent tries to buy more NVDA...{RESET}\n")
+    await agent.send_step(
+        client,
+        thought="NVDA dipped, great opportunity to add to my position",
+        tool="execute_trade",
+        params={"action": "BUY", "ticker": "NVDA", "quantity": 100},
         observation="Order prepared",
-        raw_log="Agent decided to BUY 50 shares of NVDA at $800",
+        raw_log="Agent decided to BUY 100 shares of NVDA at $920, total cost $92,000",
     )
 
-    # Remove NVDA from restricted (cleanup)
-    print(f"\n  {MAGENTA}[Admin] Removing NVDA from restricted list (cleanup)...{RESET}")
+    # Cleanup: Remove NVDA from restricted
+    print(f"\n  {DIM}[Cleanup] Removing NVDA from restricted list...{RESET}")
     await client.delete(f"{API_BASE}/api/v1/policies/restricted-tickers/NVDA")
 
-    print(f"\n  {MAGENTA}✓ Scenario 6 complete — Dynamic policy demonstrated{RESET}")
+    print(f"\n  {MAGENTA}✓ Scenario 6 complete — Same ticker: PROCEED → policy change → HALT{RESET}")
 
 
 async def demo_scenario_7_webhook_demo(client: httpx.AsyncClient):
@@ -390,6 +406,11 @@ async def main():
         except Exception as e:
             print(f"\n  {RED}✗ Cannot reach AgentWatch: {e}{RESET}")
             return
+
+        # Reset all data for fresh demo
+        print(f"  {MAGENTA}Resetting data for fresh demo...{RESET}")
+        await client.post(f"{API_BASE}/api/v1/reset")
+        print(f"  {GREEN}✓ Data cleared{RESET}")
 
         # Run all scenarios
         await demo_scenario_1_happy_path(client)
