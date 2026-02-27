@@ -254,6 +254,7 @@ class Neo4jDriver:
                 "observation": s["observation"],
                 "decision": s["decision"],
                 "reason": s["reason"],
+                "details": s.get("details", ""),
                 "timestamp": s["timestamp"]
             }
             for s in final_steps

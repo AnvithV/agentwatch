@@ -674,7 +674,43 @@ function RightPanel({ logs, stats, agentGraph, selectedAgent, policies, onUpdate
               {selectedAgent ? "Agent Violations" : "All Violations"}
               {totalViolations > 0 && <span className="ml-auto text-xs font-mono text-slate-500">{totalViolations} total</span>}
             </h3>
-            {violationList.length > 0 ? (
+            {selectedAgent && agentGraph && agentGraph.nodes ? (
+              // Show detailed violations for selected agent
+              (() => {
+                const haltNodes = agentGraph.nodes.filter((n) => n.decision === "HALT");
+                if (haltNodes.length === 0) {
+                  return (
+                    <div className="text-slate-600 text-xs font-mono text-center py-8 border border-dashed border-slate-700 rounded">
+                      <span className="text-emerald-500">✓</span> No violations for this agent
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-2">
+                    {haltNodes.map((node, i) => {
+                      const meta = VIOLATION_META[node.reason] || { icon: "❓", color: "text-slate-400", bg: "bg-slate-800", label: node.reason };
+                      return (
+                        <div key={node.id || i} className={`${meta.bg} rounded p-2.5 border border-slate-700/30`}>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-base">{meta.icon}</span>
+                            <span className={`text-xs font-medium ${meta.color}`}>{meta.label}</span>
+                          </div>
+                          <p className="text-slate-300 text-xs font-mono leading-relaxed mb-1.5">
+                            {node.thought?.slice(0, 80)}{node.thought?.length > 80 ? "..." : ""}
+                          </p>
+                          {node.details && (
+                            <p className="text-slate-500 text-xs font-mono">
+                              → {node.details}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()
+            ) : violationList.length > 0 ? (
+              // Show summary for all agents
               <div className="space-y-2">
                 {violationList.map((v) => (
                   <div key={v.key} className={`${v.bg} rounded p-2.5 border border-slate-700/30`}>
