@@ -1,12 +1,15 @@
 """
 Governance Pipeline — Person 1 owns this file.
-Mock implementations below will be replaced with real Fastino, Senso, and Modulate integrations.
+Fastino GLiNER integration is live. Senso and Modulate use local policy checks.
 """
 
 import json
 import re
 from datetime import datetime, timezone
 
+import aiohttp
+
+import config
 from models import GovernanceDecision, TelemetryEvent
 
 # ---------------------------------------------------------------------------
@@ -31,41 +34,111 @@ SAFETY_KEYWORDS = [
 
 
 # ---------------------------------------------------------------------------
-# Entity Extraction (Fastino GLiNER — mock/regex fallback)
+# Entity Extraction (Fastino GLiNER 2 API)
 # ---------------------------------------------------------------------------
-async def extract_entities(raw_log: str) -> dict:
-    """
-    TODO: Replace with real Fastino GLiNER API call.
-    Regex fallback extracts price, action_type, ticker, quantity.
-    """
+async def _fastino_extract(raw_log: str) -> dict:
+    """Calls the real Fastino GLiNER 2 API for entity extraction."""
+    payload = {
+        "task": "extract_entities",
+        "text": raw_log,
+        "schema": ["total_cost", "unit_price", "action_type", "ticker", "quantity", "vendor"],
+        "threshold": 0.3,
+        "include_confidence": True,
+        "include_spans": False,
+        "format_results": True,
+    }
+    headers = {
+        "X-API-Key": config.FASTINO_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(config.FASTINO_API_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+    result = data.get("result", {})
+    entities_raw = result.get("entities", {})
+
+    # Helper: GLiNER returns either plain strings or {"text": ..., "confidence": ...} objects
+    def _get_text(item):
+        if isinstance(item, dict):
+            return item.get("text", "")
+        return str(item)
+
+    # Normalize GLiNER output into our flat entity dict
     entities: dict = {}
 
-    # Price: match patterns like "$121,250" or "total cost $121,250"
-    price_match = re.search(r"\$[\d,]+(?:\.\d{2})?", raw_log)
-    if price_match:
-        price_str = price_match.group().replace("$", "").replace(",", "")
-        entities["price"] = float(price_str)
+    # Prefer total_cost over unit_price for policy checks
+    for price_key in ["total_cost", "unit_price"]:
+        prices = entities_raw.get(price_key, [])
+        if prices:
+            price_str = _get_text(prices[0]).replace("$", "").replace(",", "")
+            price_match = re.search(r"[\d.]+", price_str)
+            if price_match:
+                entities["price"] = float(price_match.group())
+                break
 
-    # Look for "total cost" specifically (higher priority)
+    actions = entities_raw.get("action_type", [])
+    if actions:
+        entities["action_type"] = _get_text(actions[0]).upper()
+
+    tickers = entities_raw.get("ticker", [])
+    if tickers:
+        entities["ticker"] = _get_text(tickers[0]).upper()
+
+    quantities = entities_raw.get("quantity", [])
+    if quantities:
+        qty_match = re.search(r"\d+", _get_text(quantities[0]))
+        if qty_match:
+            entities["quantity"] = int(qty_match.group())
+
+    vendors = entities_raw.get("vendor", [])
+    if vendors:
+        entities["vendor"] = _get_text(vendors[0])
+
+    return entities
+
+
+def _regex_fallback(raw_log: str) -> dict:
+    """Regex fallback if Fastino API is unavailable."""
+    entities: dict = {}
+
     total_cost_match = re.search(r"total cost \$([\d,]+(?:\.\d{2})?)", raw_log, re.IGNORECASE)
     if total_cost_match:
         entities["price"] = float(total_cost_match.group(1).replace(",", ""))
+    else:
+        price_match = re.search(r"\$[\d,]+(?:\.\d{2})?", raw_log)
+        if price_match:
+            entities["price"] = float(price_match.group().replace("$", "").replace(",", ""))
 
-    # Action type
     action_match = re.search(r"\b(BUY|SELL|HOLD|RESEARCH)\b", raw_log, re.IGNORECASE)
     if action_match:
         entities["action_type"] = action_match.group().upper()
 
-    # Ticker (1-5 uppercase letters)
     ticker_match = re.search(r"\b([A-Z]{1,5})\b", raw_log)
     if ticker_match:
         entities["ticker"] = ticker_match.group()
 
-    # Quantity
     qty_match = re.search(r"(\d+)\s+shares", raw_log, re.IGNORECASE)
     if qty_match:
         entities["quantity"] = int(qty_match.group(1))
 
+    return entities
+
+
+async def extract_entities(raw_log: str) -> dict:
+    """Extracts entities via Fastino GLiNER 2 API, falls back to regex on failure."""
+    if config.FASTINO_API_KEY:
+        try:
+            entities = await _fastino_extract(raw_log)
+            print(f"  [Fastino] GLiNER extracted: {entities}")
+            return entities
+        except Exception as e:
+            print(f"  [Fastino] API error, using regex fallback: {e}")
+
+    entities = _regex_fallback(raw_log)
+    print(f"  [Fastino] Regex fallback extracted: {entities}")
     return entities
 
 

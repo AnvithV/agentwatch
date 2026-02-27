@@ -17,6 +17,9 @@ async def health():
 @app.post("/api/v1/telemetry", response_model=GovernanceDecision)
 async def receive_telemetry(event: TelemetryEvent):
     telemetry = event.model_dump()
+    # Ensure timestamp is a string for Neo4j/JSON storage
+    if isinstance(telemetry.get("timestamp"), datetime):
+        telemetry["timestamp"] = telemetry["timestamp"].isoformat()
 
     # 1. Pre-log the step so loop detection can see it
     await log_step(telemetry, {"decision": "PENDING", "reason": "", "triggered_by": ""})
