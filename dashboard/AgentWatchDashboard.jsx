@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import {
   Square,
+  Play,
   Activity,
   AlertTriangle,
   CheckCircle,
@@ -12,6 +13,12 @@ import {
   Shield,
   Zap,
   RefreshCw,
+  Settings,
+  Plus,
+  X,
+  DollarSign,
+  TrendingUp,
+  Lock,
 } from "lucide-react";
 import {
   BarChart,
@@ -138,7 +145,7 @@ function DecisionBadge({ decision }) {
 
 // ─── Left Sidebar ─────────────────────────────────────────────────────────────
 
-function Sidebar({ agents, onStop, mockMode, selectedAgent, onSelectAgent }) {
+function Sidebar({ agents, onStop, onResume, mockMode, selectedAgent, onSelectAgent, haltedAgents }) {
   const total = agents.length;
   const active = agents.filter((a) => a.status === "RUNNING").length;
   const halted = agents.filter((a) => a.status === "HALTED").length;
@@ -159,42 +166,53 @@ function Sidebar({ agents, onStop, mockMode, selectedAgent, onSelectAgent }) {
       </div>
 
       <div className="flex-1 overflow-y-auto py-2">
-        {agents.map((agent) => (
-          <div
-            key={agent.agent_id}
-            onClick={() => onSelectAgent && onSelectAgent(agent.agent_id)}
-            className={`px-3 py-2.5 mx-2 mb-1 rounded border transition-colors cursor-pointer ${
-              selectedAgent === agent.agent_id
-                ? "bg-cyan-950/50 border-cyan-500/60 ring-1 ring-cyan-500/30"
-                : agent.status === "HALTED"
-                ? "bg-red-950/40 border-red-700/40 hover:border-red-600/60"
-                : "bg-slate-800/40 border-slate-700/20 hover:border-slate-600/50"
-            }`}
-          >
-            <div className="flex items-center gap-2 mb-1">
-              <StatusDot status={agent.status} />
-              <span className="text-slate-200 text-sm font-medium truncate flex-1">{agent.name}</span>
-              {agent.status !== "HALTED" && (
-                <button
-                  onClick={() => onStop(agent.agent_id)}
-                  title="Stop agent"
-                  className="text-slate-500 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-950/50"
-                >
-                  <Square className="w-3.5 h-3.5" />
-                </button>
+        {agents.map((agent) => {
+          const isHalted = agent.status === "HALTED" || haltedAgents.has(agent.agent_id);
+          return (
+            <div
+              key={agent.agent_id}
+              onClick={() => onSelectAgent && onSelectAgent(agent.agent_id)}
+              className={`px-3 py-2.5 mx-2 mb-1 rounded border transition-colors cursor-pointer ${
+                selectedAgent === agent.agent_id
+                  ? "bg-cyan-950/50 border-cyan-500/60 ring-1 ring-cyan-500/30"
+                  : isHalted
+                  ? "bg-red-950/40 border-red-700/40 hover:border-red-600/60"
+                  : "bg-slate-800/40 border-slate-700/20 hover:border-slate-600/50"
+              }`}
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <StatusDot status={isHalted ? "HALTED" : agent.status} />
+                <span className="text-slate-200 text-sm font-medium truncate flex-1">{agent.name}</span>
+                {isHalted ? (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onResume(agent.agent_id); }}
+                    title="Resume agent"
+                    className="text-slate-500 hover:text-emerald-400 transition-colors p-0.5 rounded hover:bg-emerald-950/50"
+                  >
+                    <Play className="w-3.5 h-3.5" />
+                  </button>
+                ) : (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onStop(agent.agent_id); }}
+                    title="Stop agent"
+                    className="text-slate-500 hover:text-red-400 transition-colors p-0.5 rounded hover:bg-red-950/50"
+                  >
+                    <Square className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-500 text-xs font-mono">{agent.agent_id}</span>
+                <DecisionBadge decision={agent.lastDecision || "PROCEED"} />
+              </div>
+              {agent.total_steps != null && (
+                <div className="mt-1 text-slate-600 text-xs font-mono">
+                  {agent.total_steps} steps · {agent.halt_count || 0} halts
+                </div>
               )}
             </div>
-            <div className="flex items-center justify-between">
-              <span className="text-slate-500 text-xs font-mono">{agent.agent_id}</span>
-              <DecisionBadge decision={agent.lastDecision || "PROCEED"} />
-            </div>
-            {agent.total_steps != null && (
-              <div className="mt-1 text-slate-600 text-xs font-mono">
-                {agent.total_steps} steps · {agent.halt_count || 0} halts
-              </div>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="border-t border-slate-700/50 px-4 py-3 grid grid-cols-3 gap-2">
@@ -320,7 +338,7 @@ function CenterPanel({ logs, connected, stats }) {
         <div className="flex items-center gap-1.5 ml-1">
           <span className={`w-2 h-2 rounded-full ${connected ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`} />
           {connected ? (
-            <><Wifi className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-400 text-xs font-mono">live</span></>
+            <><Wifi className="w-3.5 h-3.5 text-emerald-400" /><span className="text-emerald-400 text-xs font-mono">websocket</span></>
           ) : (
             <><WifiOff className="w-3.5 h-3.5 text-yellow-400" /><span className="text-yellow-400 text-xs font-mono">demo mode</span></>
           )}
@@ -421,9 +439,161 @@ function ReasoningGraph({ agentGraph, selectedAgent }) {
   );
 }
 
+// ─── Policy Editor ─────────────────────────────────────────────────────────────
+
+function PolicyEditor({ policies, onUpdatePolicies, onAddTicker, onRemoveTicker }) {
+  const [newTicker, setNewTicker] = useState("");
+  const [editingBudget, setEditingBudget] = useState(false);
+  const [budgetValue, setBudgetValue] = useState("");
+  const [editingPosition, setEditingPosition] = useState(false);
+  const [positionValue, setPositionValue] = useState("");
+
+  if (!policies) {
+    return (
+      <div className="text-slate-500 text-xs font-mono text-center py-4">
+        Loading policies...
+      </div>
+    );
+  }
+
+  const handleAddTicker = () => {
+    if (newTicker.trim()) {
+      onAddTicker(newTicker.trim().toUpperCase());
+      setNewTicker("");
+    }
+  };
+
+  const handleBudgetSave = () => {
+    const val = parseInt(budgetValue.replace(/,/g, ""), 10);
+    if (!isNaN(val) && val > 0) {
+      onUpdatePolicies({ budget_limit: val });
+    }
+    setEditingBudget(false);
+  };
+
+  const handlePositionSave = () => {
+    const val = parseInt(positionValue, 10);
+    if (!isNaN(val) && val > 0) {
+      onUpdatePolicies({ max_position_size: val });
+    }
+    setEditingPosition(false);
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Budget Limit */}
+      <div className="bg-slate-800/50 rounded p-2.5 border border-slate-700/30">
+        <div className="flex items-center gap-2 mb-2">
+          <DollarSign className="w-4 h-4 text-emerald-400" />
+          <span className="text-xs font-medium text-slate-300">Budget Limit</span>
+        </div>
+        {editingBudget ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={budgetValue}
+              onChange={(e) => setBudgetValue(e.target.value)}
+              className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-cyan-500"
+              placeholder="100000"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && handleBudgetSave()}
+            />
+            <button onClick={handleBudgetSave} className="text-emerald-400 hover:text-emerald-300 text-xs font-mono">Save</button>
+            <button onClick={() => setEditingBudget(false)} className="text-slate-500 hover:text-slate-400 text-xs font-mono">Cancel</button>
+          </div>
+        ) : (
+          <div
+            onClick={() => { setBudgetValue(policies.budget_limit?.toString() || ""); setEditingBudget(true); }}
+            className="text-xl font-bold font-mono text-emerald-400 cursor-pointer hover:text-emerald-300 transition-colors"
+          >
+            ${(policies.budget_limit || 0).toLocaleString()}
+          </div>
+        )}
+      </div>
+
+      {/* Max Position Size */}
+      <div className="bg-slate-800/50 rounded p-2.5 border border-slate-700/30">
+        <div className="flex items-center gap-2 mb-2">
+          <TrendingUp className="w-4 h-4 text-cyan-400" />
+          <span className="text-xs font-medium text-slate-300">Max Position Size</span>
+        </div>
+        {editingPosition ? (
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={positionValue}
+              onChange={(e) => setPositionValue(e.target.value)}
+              className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm font-mono text-white focus:outline-none focus:border-cyan-500"
+              placeholder="1000"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && handlePositionSave()}
+            />
+            <button onClick={handlePositionSave} className="text-emerald-400 hover:text-emerald-300 text-xs font-mono">Save</button>
+            <button onClick={() => setEditingPosition(false)} className="text-slate-500 hover:text-slate-400 text-xs font-mono">Cancel</button>
+          </div>
+        ) : (
+          <div
+            onClick={() => { setPositionValue(policies.max_position_size?.toString() || ""); setEditingPosition(true); }}
+            className="text-xl font-bold font-mono text-cyan-400 cursor-pointer hover:text-cyan-300 transition-colors"
+          >
+            {(policies.max_position_size || 0).toLocaleString()} shares
+          </div>
+        )}
+      </div>
+
+      {/* Restricted Tickers */}
+      <div className="bg-slate-800/50 rounded p-2.5 border border-slate-700/30">
+        <div className="flex items-center gap-2 mb-2">
+          <Lock className="w-4 h-4 text-red-400" />
+          <span className="text-xs font-medium text-slate-300">Restricted Tickers</span>
+        </div>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {(policies.restricted_tickers || []).map((ticker) => (
+            <span
+              key={ticker}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-red-900/50 text-red-400 text-xs font-mono border border-red-700/50"
+            >
+              {ticker}
+              <button
+                onClick={() => onRemoveTicker(ticker)}
+                className="hover:text-red-300 transition-colors"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+          {(policies.restricted_tickers || []).length === 0 && (
+            <span className="text-slate-500 text-xs font-mono">No restrictions</span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="text"
+            value={newTicker}
+            onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
+            className="flex-1 bg-slate-900 border border-slate-600 rounded px-2 py-1 text-xs font-mono text-white focus:outline-none focus:border-cyan-500"
+            placeholder="Add ticker (e.g., NVDA)"
+            maxLength={5}
+            onKeyDown={(e) => e.key === "Enter" && handleAddTicker()}
+          />
+          <button
+            onClick={handleAddTicker}
+            disabled={!newTicker.trim()}
+            className="p-1 rounded bg-red-900/50 text-red-400 hover:bg-red-900/70 hover:text-red-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Right Panel ──────────────────────────────────────────────────────────────
 
-function RightPanel({ logs, stats, agentGraph, selectedAgent }) {
+function RightPanel({ logs, stats, agentGraph, selectedAgent, policies, onUpdatePolicies, onAddTicker, onRemoveTicker }) {
+  const [activeTab, setActiveTab] = useState("graph"); // "graph" or "policies"
+
   // Build violation data with icons and colors
   const VIOLATION_META = {
     "POLICY_VIOLATION": { icon: "🚫", color: "text-red-400", bg: "bg-red-900/40", label: "Policy Violation" },
@@ -436,7 +606,6 @@ function RightPanel({ logs, stats, agentGraph, selectedAgent }) {
   // If agent selected, count violations from their graph; otherwise use global stats
   let violationsSource = {};
   if (selectedAgent && agentGraph && agentGraph.nodes) {
-    // Count violations for this specific agent
     agentGraph.nodes.forEach((n) => {
       if (n.decision === "HALT" && n.reason) {
         violationsSource[n.reason] = (violationsSource[n.reason] || 0) + 1;
@@ -458,50 +627,101 @@ function RightPanel({ logs, stats, agentGraph, selectedAgent }) {
 
   return (
     <div className="w-80 flex-shrink-0 bg-slate-900 border-l border-slate-700/50 flex flex-col h-screen overflow-hidden">
-      <div className="border-b border-slate-700/50 p-4 flex-1 overflow-hidden flex flex-col">
-        <h3 className="text-slate-300 font-medium text-sm mb-3 flex items-center gap-2">
-          <Activity className="w-4 h-4 text-cyan-400" />
-          Reasoning Graph
-          {selectedAgent && <span className="text-cyan-400 text-xs font-mono ml-auto">{selectedAgent}</span>}
-        </h3>
-        <div className="flex-1 relative">
-          <ReasoningGraph agentGraph={agentGraph} selectedAgent={selectedAgent} />
-        </div>
+      {/* Tab Headers */}
+      <div className="flex border-b border-slate-700/50">
+        <button
+          onClick={() => setActiveTab("graph")}
+          className={`flex-1 px-3 py-2.5 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${
+            activeTab === "graph"
+              ? "text-cyan-400 border-b-2 border-cyan-400 bg-slate-800/30"
+              : "text-slate-500 hover:text-slate-300"
+          }`}
+        >
+          <Activity className="w-3.5 h-3.5" />
+          Graph
+        </button>
+        <button
+          onClick={() => setActiveTab("policies")}
+          className={`flex-1 px-3 py-2.5 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors ${
+            activeTab === "policies"
+              ? "text-cyan-400 border-b-2 border-cyan-400 bg-slate-800/30"
+              : "text-slate-500 hover:text-slate-300"
+          }`}
+        >
+          <Settings className="w-3.5 h-3.5" />
+          Policies
+        </button>
       </div>
 
-      <div className="p-4">
-        <h3 className="text-slate-300 font-medium text-sm mb-3 flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-yellow-400" />
-          {selectedAgent ? "Agent Violations" : "All Violations"}
-          {totalViolations > 0 && <span className="ml-auto text-xs font-mono text-slate-500">{totalViolations} total</span>}
-        </h3>
-        {violationList.length > 0 ? (
-          <div className="space-y-2">
-            {violationList.map((v) => (
-              <div key={v.key} className={`${v.bg} rounded p-2.5 border border-slate-700/30`}>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="text-base">{v.icon}</span>
-                  <span className={`text-xs font-medium ${v.color}`}>{v.label}</span>
-                  <span className="ml-auto text-sm font-bold font-mono text-white">{v.count}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="flex-1 h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full rounded-full ${v.color.replace('text-', 'bg-')}`}
-                      style={{ width: `${v.pct}%` }}
-                    />
+      {activeTab === "graph" ? (
+        <>
+          {/* Reasoning Graph */}
+          <div className="border-b border-slate-700/50 p-4 flex-1 overflow-hidden flex flex-col">
+            <h3 className="text-slate-300 font-medium text-sm mb-3 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-cyan-400" />
+              Reasoning Graph
+              {selectedAgent && <span className="text-cyan-400 text-xs font-mono ml-auto">{selectedAgent}</span>}
+            </h3>
+            <div className="flex-1 relative overflow-y-auto">
+              <ReasoningGraph agentGraph={agentGraph} selectedAgent={selectedAgent} />
+            </div>
+          </div>
+
+          {/* Violations */}
+          <div className="p-4 overflow-y-auto">
+            <h3 className="text-slate-300 font-medium text-sm mb-3 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-yellow-400" />
+              {selectedAgent ? "Agent Violations" : "All Violations"}
+              {totalViolations > 0 && <span className="ml-auto text-xs font-mono text-slate-500">{totalViolations} total</span>}
+            </h3>
+            {violationList.length > 0 ? (
+              <div className="space-y-2">
+                {violationList.map((v) => (
+                  <div key={v.key} className={`${v.bg} rounded p-2.5 border border-slate-700/30`}>
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="text-base">{v.icon}</span>
+                      <span className={`text-xs font-medium ${v.color}`}>{v.label}</span>
+                      <span className="ml-auto text-sm font-bold font-mono text-white">{v.count}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
+                        <div
+                          className={`h-full rounded-full ${v.color.replace('text-', 'bg-')}`}
+                          style={{ width: `${v.pct}%` }}
+                        />
+                      </div>
+                      <span className="text-xs font-mono text-slate-400">{v.pct}%</span>
+                    </div>
                   </div>
-                  <span className="text-xs font-mono text-slate-400">{v.pct}%</span>
-                </div>
+                ))}
               </div>
-            ))}
+            ) : (
+              <div className="text-slate-600 text-xs font-mono text-center py-8 border border-dashed border-slate-700 rounded">
+                No violations detected
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="text-slate-600 text-xs font-mono text-center py-8 border border-dashed border-slate-700 rounded">
-            ✅ No violations detected
+        </>
+      ) : (
+        /* Policy Editor Tab */
+        <div className="p-4 flex-1 overflow-y-auto">
+          <h3 className="text-slate-300 font-medium text-sm mb-4 flex items-center gap-2">
+            <Settings className="w-4 h-4 text-cyan-400" />
+            Live Policy Editor
+          </h3>
+          <PolicyEditor
+            policies={policies}
+            onUpdatePolicies={onUpdatePolicies}
+            onAddTicker={onAddTicker}
+            onRemoveTicker={onRemoveTicker}
+          />
+          <div className="mt-4 p-2 bg-slate-800/30 rounded border border-slate-700/30">
+            <p className="text-slate-500 text-xs font-mono leading-relaxed">
+              Changes take effect immediately. Try adding NVDA to restricted list and watch it get blocked in the demo.
+            </p>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -547,9 +767,13 @@ export default function AgentWatchDashboard() {
   const [mockMode, setMockMode] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState(null);
   const [agentGraph, setAgentGraph] = useState(null);
+  const [policies, setPolicies] = useState(null);
+  const [haltedAgents, setHaltedAgents] = useState(new Set());
+  const [wsConnected, setWsConnected] = useState(false);
   const localHalted = useRef(new Set());
   const seenIds = useRef(new Set());
   const mockIntervalRef = useRef(null);
+  const wsRef = useRef(null);
 
   // ── Bootstrap: try real backend, fall back to mock ──
   useEffect(() => {
@@ -557,14 +781,20 @@ export default function AgentWatchDashboard() {
 
     async function bootstrap() {
       try {
-        // Try fetching agents + recent decisions
-        const [agentsData, recentData, statsData] = await Promise.all([
+        // Try fetching agents + recent decisions + policies
+        const [agentsData, recentData, statsData, policiesData, haltedData] = await Promise.all([
           apiFetch("/agents"),
           apiFetch("/recent?limit=30"),
           apiFetch("/stats"),
+          apiFetch("/policies"),
+          apiFetch("/halted"),
         ]);
 
         if (cancelled) return;
+
+        // Set halted agents from backend
+        setHaltedAgents(new Set(haltedData.halted_agents || []));
+        haltedData.halted_agents?.forEach((id) => localHalted.current.add(id));
 
         // Map backend agents to UI shape
         const backendAgents = (agentsData.agents || []).map((a) => ({
@@ -581,6 +811,7 @@ export default function AgentWatchDashboard() {
         setAgents(backendAgents);
         setLogs(decisions);
         setStats(statsData);
+        setPolicies(policiesData.policies || null);
         setConnected(true);
         setMockMode(false);  // Never mock when backend is connected
       } catch {
@@ -588,6 +819,12 @@ export default function AgentWatchDashboard() {
         // Backend unreachable — full mock mode
         setAgents(MOCK_AGENTS);
         setLogs(generateMockLogs());
+        setPolicies({
+          budget_limit: 100000,
+          restricted_tickers: ["GME", "AMC", "BBBY"],
+          max_position_size: 1000,
+          allowed_actions: ["BUY", "SELL", "HOLD", "RESEARCH"],
+        });
         setConnected(false);
         setMockMode(true);
       }
@@ -650,6 +887,87 @@ export default function AgentWatchDashboard() {
     return () => clearInterval(interval);
   }, [mockMode]);
 
+  // ── WebSocket connection for real-time updates ──
+  useEffect(() => {
+    if (mockMode) return;
+
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+    function connectWebSocket() {
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log("[WebSocket] Connected");
+        setWsConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+
+          if (msg.type === "decision") {
+            const decision = msg.data;
+            const uid = decision.id || `${decision.agent_id}-${decision.step_id}`;
+
+            if (!seenIds.current.has(uid)) {
+              seenIds.current.add(uid);
+              setLogs((prev) => {
+                const updated = [{ ...decision, isNew: true }, ...prev].slice(0, 100);
+                setTimeout(() => {
+                  setLogs((l) => l.map((e) => e.id === uid ? { ...e, isNew: false } : e));
+                }, 1000);
+                return updated;
+              });
+
+              // Refresh stats
+              apiFetch("/stats").then(setStats).catch(() => {});
+              apiFetch("/agents").then((data) => {
+                const backendAgents = (data.agents || []).map((a) => ({
+                  ...a,
+                  name: AGENT_NAMES[a.agent_id] || a.agent_id,
+                  status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
+                  lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
+                }));
+                if (backendAgents.length > 0) setAgents(backendAgents);
+              }).catch(() => {});
+            }
+          } else if (msg.type === "policy_update") {
+            setPolicies(msg.data.policies);
+          } else if (msg.type === "agent_status") {
+            setHaltedAgents(new Set(msg.data.halted_agents || []));
+            msg.data.halted_agents?.forEach((id) => localHalted.current.add(id));
+            if (msg.data.status === "resumed") {
+              localHalted.current.delete(msg.data.agent_id);
+            }
+          }
+        } catch (err) {
+          console.error("[WebSocket] Parse error:", err);
+        }
+      };
+
+      ws.onclose = () => {
+        console.log("[WebSocket] Disconnected, reconnecting in 2s...");
+        setWsConnected(false);
+        setTimeout(connectWebSocket, 2000);
+      };
+
+      ws.onerror = (err) => {
+        console.error("[WebSocket] Error:", err);
+        ws.close();
+      };
+    }
+
+    connectWebSocket();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+    };
+  }, [mockMode]);
+
   // ── Mock interval: simulate events when backend is unreachable ──
   useEffect(() => {
     if (!mockMode) return;
@@ -673,9 +991,51 @@ export default function AgentWatchDashboard() {
     return () => clearInterval(interval);
   }, [mockMode]);
 
+  // ── Policy update handlers ──
+  const handleUpdatePolicies = useCallback(async (update) => {
+    try {
+      const res = await fetch(`${API}/policies`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(update),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPolicies(data.current_policies);
+      }
+    } catch (err) {
+      console.error("Failed to update policies:", err);
+    }
+  }, []);
+
+  const handleAddTicker = useCallback(async (ticker) => {
+    try {
+      const res = await fetch(`${API}/policies/restricted-tickers/${ticker}`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setPolicies((prev) => prev ? { ...prev, restricted_tickers: data.restricted_tickers } : prev);
+      }
+    } catch (err) {
+      console.error("Failed to add ticker:", err);
+    }
+  }, []);
+
+  const handleRemoveTicker = useCallback(async (ticker) => {
+    try {
+      const res = await fetch(`${API}/policies/restricted-tickers/${ticker}`, { method: "DELETE" });
+      if (res.ok) {
+        const data = await res.json();
+        setPolicies((prev) => prev ? { ...prev, restricted_tickers: data.restricted_tickers } : prev);
+      }
+    } catch (err) {
+      console.error("Failed to remove ticker:", err);
+    }
+  }, []);
+
   // ── Stop handler ──
   const handleStop = useCallback(async (agentId) => {
     localHalted.current.add(agentId);
+    setHaltedAgents((prev) => new Set([...prev, agentId]));
 
     setAgents((prev) =>
       prev.map((a) => a.agent_id === agentId ? { ...a, status: "HALTED", lastDecision: "HALT" } : a)
@@ -703,6 +1063,26 @@ export default function AgentWatchDashboard() {
 
     try {
       await fetch(`${API}/agent/${agentId}/halt`, { method: "POST" });
+    } catch {
+      // backend may not be running
+    }
+  }, []);
+
+  // ── Resume handler ──
+  const handleResume = useCallback(async (agentId) => {
+    localHalted.current.delete(agentId);
+    setHaltedAgents((prev) => {
+      const next = new Set(prev);
+      next.delete(agentId);
+      return next;
+    });
+
+    setAgents((prev) =>
+      prev.map((a) => a.agent_id === agentId ? { ...a, status: "RUNNING" } : a)
+    );
+
+    try {
+      await fetch(`${API}/agent/${agentId}/resume`, { method: "POST" });
     } catch {
       // backend may not be running
     }
@@ -759,9 +1139,26 @@ export default function AgentWatchDashboard() {
     <>
       <style>{styles}</style>
       <div className="flex h-screen bg-slate-950 text-slate-100 font-sans overflow-hidden">
-        <Sidebar agents={agents} onStop={handleStop} mockMode={mockMode} selectedAgent={selectedAgent} onSelectAgent={handleSelectAgent} />
-        <CenterPanel logs={logs} connected={connected} stats={stats} />
-        <RightPanel logs={logs} stats={stats} agentGraph={agentGraph} selectedAgent={selectedAgent} />
+        <Sidebar
+          agents={agents}
+          onStop={handleStop}
+          onResume={handleResume}
+          mockMode={mockMode}
+          selectedAgent={selectedAgent}
+          onSelectAgent={handleSelectAgent}
+          haltedAgents={haltedAgents}
+        />
+        <CenterPanel logs={logs} connected={connected || wsConnected} stats={stats} />
+        <RightPanel
+          logs={logs}
+          stats={stats}
+          agentGraph={agentGraph}
+          selectedAgent={selectedAgent}
+          policies={policies}
+          onUpdatePolicies={handleUpdatePolicies}
+          onAddTicker={handleAddTicker}
+          onRemoveTicker={handleRemoveTicker}
+        />
       </div>
     </>
   );
