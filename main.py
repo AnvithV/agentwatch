@@ -124,3 +124,25 @@ async def receive_telemetry(event: TelemetryEvent):
 async def get_graph(agent_id: str):
     graph = await get_agent_graph(agent_id)
     return graph
+
+
+@app.get("/api/v1/stats")
+async def get_stats():
+    """Get aggregated governance statistics."""
+    from neo4j_driver import get_stats
+    return await get_stats()
+
+
+@app.get("/api/v1/agents")
+async def list_agents():
+    """List all agents with their step counts."""
+    from neo4j_driver import list_agents
+    return await list_agents()
+
+
+@app.get("/api/v1/agent/{agent_id}/halts")
+async def get_agent_halts(agent_id: str):
+    """Get all HALT decisions for an agent with details."""
+    from neo4j_driver import get_halted_steps
+    halts = await get_halted_steps(agent_id)
+    return {"agent_id": agent_id, "halts": halts, "count": len(halts)}
