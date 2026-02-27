@@ -1,5 +1,5 @@
 """
-AgentWatch Showcase Demo — Comprehensive demonstration of all features.
+Argus Showcase Demo — Comprehensive demonstration of all features.
 
 This demo is designed for hackathon presentation, showing:
 1. Multiple concurrent agents
@@ -75,7 +75,7 @@ class DemoAgent:
         observation: str,
         raw_log: str,
     ) -> dict:
-        """Send a step to AgentWatch and return the decision."""
+        """Send a step to Argus and return the decision."""
         self.step_count += 1
         step = {
             "agent_id": self.agent_id,
@@ -496,7 +496,7 @@ async def show_final_stats(client: httpx.AsyncClient):
 
 
 async def main():
-    banner("AgentWatch — Governance Middleware Demo")
+    banner("Argus — Hundred-Eyed Agent Governance")
     print(f"  {DIM}Demonstrating: Fastino + Senso + Neo4j + Tavily{RESET}")
     print(f"  {DIM}Features: Policy checks, loop detection, safety, webhooks{RESET}")
 
@@ -505,9 +505,9 @@ async def main():
         try:
             resp = await client.get(f"{API_BASE}/health")
             resp.raise_for_status()
-            print(f"\n  {GREEN}✓ AgentWatch server healthy{RESET}")
+            print(f"\n  {GREEN}✓ Argus server healthy{RESET}")
         except Exception as e:
-            print(f"\n  {RED}✗ Cannot reach AgentWatch: {e}{RESET}")
+            print(f"\n  {RED}✗ Cannot reach Argus: {e}{RESET}")
             return
 
         # Reset all data for fresh demo

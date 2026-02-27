@@ -156,11 +156,11 @@ function Sidebar({ agents, onStop, onResume, mockMode, selectedAgent, onSelectAg
       <div className="px-4 py-4 border-b border-slate-700/50">
         <div className="flex items-center gap-2.5 mb-1">
           <Shield className="w-5 h-5 text-cyan-400" />
-          <span className="text-white font-bold tracking-tight text-lg">AgentWatch</span>
+          <span className="text-white font-bold tracking-tight text-lg">Argus</span>
           <span className={`ml-auto w-2.5 h-2.5 rounded-full flex-shrink-0 ${globalStatus === "RUNNING" ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`} />
         </div>
         <p className="text-slate-500 text-xs font-mono flex items-center gap-1">
-          governance pipeline
+          hundred-eyed oversight
           {mockMode && <span className="text-yellow-500 ml-1">[demo]</span>}
         </p>
       </div>
@@ -377,63 +377,215 @@ function ReasoningGraph({ agentGraph, selectedAgent }) {
     );
   }
 
-  // Map graph nodes to visual positions (vertical flow)
-  const graphNodes = agentGraph.nodes.slice(0, 10).map((node, i) => ({
+  // Combine agent nodes with cross-agent nodes
+  const crossAgentNodes = agentGraph.cross_agent_nodes || [];
+  const influences = agentGraph.influences || [];
+  const hasCrossAgent = crossAgentNodes.length > 0 || influences.length > 0;
+
+  // Build position map for all nodes
+  // Main agent nodes on left, external agent nodes on right
+  const mainNodes = agentGraph.nodes.slice(0, 8);
+  const externalNodes = crossAgentNodes.slice(0, 4);
+
+  // Position main agent nodes vertically on the left
+  const graphNodes = mainNodes.map((node, i) => ({
     id: node.id,
-    x: 140,
-    y: 30 + i * 55,
+    agent_id: node.agent_id || selectedAgent,
+    x: hasCrossAgent ? 90 : 140,
+    y: 35 + i * 50,
     decision: node.decision,
     thought: node.thought,
     tool: node.tool_used,
     stepNum: i + 1,
+    isExternal: false,
   }));
 
-  // Create edges from the graph data or sequential order
-  const graphEdges = graphNodes.slice(1).map((node, i) => ({
+  // Position external agent nodes on the right
+  const externalGraphNodes = externalNodes.map((node, i) => ({
+    id: node.id,
+    agent_id: node.agent_id,
+    x: 210,
+    y: 60 + i * 70,
+    decision: node.decision,
+    thought: node.thought,
+    tool: node.tool_used,
+    stepNum: `E${i + 1}`,
+    isExternal: true,
+  }));
+
+  // Combine all nodes for lookup
+  const allGraphNodes = [...graphNodes, ...externalGraphNodes];
+  const nodeById = Object.fromEntries(allGraphNodes.map((n) => [n.id, n]));
+
+  // Create NEXT edges (internal flow)
+  const nextEdges = graphNodes.slice(1).map((node, i) => ({
     from: graphNodes[i],
     to: node,
+    type: "NEXT",
   }));
 
-  const viewHeight = Math.max(320, graphNodes.length * 55 + 40);
+  // Create INFLUENCES edges (cross-agent)
+  const influenceEdges = influences
+    .map((inf) => {
+      const from = nodeById[inf.source];
+      const to = nodeById[inf.target];
+      if (from && to) {
+        return { from, to, type: "INFLUENCES" };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+  const allEdges = [...nextEdges, ...influenceEdges];
+
+  const viewHeight = Math.max(320, Math.max(graphNodes.length, externalGraphNodes.length) * 60 + 60);
 
   return (
     <div className="relative">
+      {hasCrossAgent && (
+        <div className="absolute top-0 right-0 text-xs font-mono px-1.5 py-0.5 bg-purple-900/50 text-purple-300 rounded border border-purple-700/50">
+          cross-agent
+        </div>
+      )}
       <svg width="100%" viewBox={`0 0 280 ${viewHeight}`} className="overflow-visible">
         <defs>
           <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
             <polygon points="0 0, 6 2, 0 4" fill="#06b6d4" />
           </marker>
+          <marker id="arrowhead-purple" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
+            <polygon points="0 0, 6 2, 0 4" fill="#a855f7" />
+          </marker>
         </defs>
-        {graphEdges.map((edge, i) => (
-          <line key={i} x1={edge.from.x} y1={edge.from.y + 14} x2={edge.to.x} y2={edge.to.y - 14}
-            stroke="#0e7490" strokeWidth="2" markerEnd="url(#arrowhead)" />
-        ))}
-        {graphNodes.map((node) => (
-          <g key={node.id} onMouseEnter={() => setTooltip(node)} onMouseLeave={() => setTooltip(null)} style={{ cursor: "pointer" }}>
-            <circle cx={node.x} cy={node.y} r={14}
-              fill={node.decision === "PROCEED" ? "#064e3b" : "#450a0a"}
-              stroke={node.decision === "PROCEED" ? "#10b981" : "#ef4444"}
-              strokeWidth="2" />
-            <text x={node.x} y={node.y + 1} textAnchor="middle" dominantBaseline="middle"
-              fontSize="9" fontWeight="bold" fill={node.decision === "PROCEED" ? "#34d399" : "#f87171"} fontFamily="monospace">
-              {node.stepNum}
-            </text>
-            <text x={node.x + 22} y={node.y + 1} dominantBaseline="middle"
-              fontSize="8" fill="#94a3b8" fontFamily="monospace">
-              {(node.tool || "").slice(0, 15)}
-            </text>
-          </g>
-        ))}
+        {/* Draw edges */}
+        {allEdges.map((edge, i) => {
+          const isInfluence = edge.type === "INFLUENCES";
+          // Calculate line endpoints
+          const x1 = edge.from.x;
+          const y1 = edge.from.y + 14;
+          const x2 = edge.to.x;
+          const y2 = edge.to.y - 14;
+
+          if (isInfluence) {
+            // Curved line for INFLUENCES edges
+            const midX = (x1 + x2) / 2;
+            const midY = (y1 + y2) / 2;
+            const controlX = midX + (x2 > x1 ? -30 : 30);
+            return (
+              <path
+                key={`inf-${i}`}
+                d={`M ${x1} ${y1} Q ${controlX} ${midY} ${x2} ${y2}`}
+                stroke="#a855f7"
+                strokeWidth="2"
+                strokeDasharray="4 2"
+                fill="none"
+                markerEnd="url(#arrowhead-purple)"
+              />
+            );
+          } else {
+            return (
+              <line
+                key={`next-${i}`}
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke="#0e7490"
+                strokeWidth="2"
+                markerEnd="url(#arrowhead)"
+              />
+            );
+          }
+        })}
+        {/* Draw nodes */}
+        {allGraphNodes.map((node) => {
+          const isExternal = node.isExternal;
+          const nodeColor = isExternal
+            ? { fill: "#4c1d95", stroke: "#a855f7", text: "#c4b5fd" }
+            : node.decision === "PROCEED"
+            ? { fill: "#064e3b", stroke: "#10b981", text: "#34d399" }
+            : { fill: "#450a0a", stroke: "#ef4444", text: "#f87171" };
+
+          return (
+            <g
+              key={node.id}
+              onMouseEnter={() => setTooltip(node)}
+              onMouseLeave={() => setTooltip(null)}
+              style={{ cursor: "pointer" }}
+            >
+              {/* Node circle */}
+              <circle
+                cx={node.x}
+                cy={node.y}
+                r={isExternal ? 12 : 14}
+                fill={nodeColor.fill}
+                stroke={nodeColor.stroke}
+                strokeWidth="2"
+                strokeDasharray={isExternal ? "3 2" : "none"}
+              />
+              {/* Step number */}
+              <text
+                x={node.x}
+                y={node.y + 1}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fontSize={isExternal ? "7" : "9"}
+                fontWeight="bold"
+                fill={nodeColor.text}
+                fontFamily="monospace"
+              >
+                {node.stepNum}
+              </text>
+              {/* Tool label */}
+              <text
+                x={isExternal ? node.x - 20 : node.x + 22}
+                y={node.y + 1}
+                textAnchor={isExternal ? "end" : "start"}
+                dominantBaseline="middle"
+                fontSize="7"
+                fill={isExternal ? "#a78bfa" : "#94a3b8"}
+                fontFamily="monospace"
+              >
+                {isExternal
+                  ? (node.agent_id || "").slice(0, 10)
+                  : (node.tool || "").slice(0, 12)}
+              </text>
+            </g>
+          );
+        })}
       </svg>
+      {/* Tooltip */}
       {tooltip && (
         <div className="absolute bottom-0 left-0 right-0 bg-slate-800 border border-slate-600/50 rounded p-2 text-xs font-mono text-slate-300 leading-snug">
-          <div className="flex items-center gap-2 mb-1">
-            <span className={`px-1.5 py-0.5 rounded text-xs ${tooltip.decision === "PROCEED" ? "bg-emerald-900/60 text-emerald-400" : "bg-red-900/60 text-red-400"}`}>
-              Step {tooltip.stepNum}
+          <div className="flex items-center gap-2 mb-1 flex-wrap">
+            <span
+              className={`px-1.5 py-0.5 rounded text-xs ${
+                tooltip.isExternal
+                  ? "bg-purple-900/60 text-purple-300"
+                  : tooltip.decision === "PROCEED"
+                  ? "bg-emerald-900/60 text-emerald-400"
+                  : "bg-red-900/60 text-red-400"
+              }`}
+            >
+              {tooltip.isExternal ? `↗ ${tooltip.agent_id}` : `Step ${tooltip.stepNum}`}
             </span>
             <span className="text-cyan-400">{tooltip.tool}</span>
+            {tooltip.isExternal && (
+              <span className="text-purple-400 text-xs">INFLUENCES</span>
+            )}
           </div>
-          {(tooltip.thought || "").slice(0, 120)}{tooltip.thought?.length > 120 ? "…" : ""}
+          {(tooltip.thought || "").slice(0, 100)}
+          {tooltip.thought?.length > 100 ? "…" : ""}
+        </div>
+      )}
+      {/* Legend for cross-agent */}
+      {hasCrossAgent && (
+        <div className="mt-2 flex items-center gap-3 text-xs font-mono text-slate-500 justify-center">
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 bg-cyan-600 inline-block"></span> flow
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-3 h-0.5 bg-purple-500 inline-block" style={{ borderBottom: "2px dashed #a855f7" }}></span> influences
+          </span>
         </div>
       )}
     </div>
@@ -951,19 +1103,22 @@ export default function AgentWatchDashboard() {
             const decision = msg.data;
             const uid = decision.id || `${decision.agent_id}-${decision.step_id}`;
 
-            // Always add to logs (deduplication via seenIds)
-            if (!seenIds.current.has(uid)) {
-              seenIds.current.add(uid);
-              setLogs((prev) => {
-                const updated = [{ ...decision, isNew: true }, ...prev].slice(0, 100);
-                setTimeout(() => {
-                  setLogs((l) => l.map((e) => (e.id === uid || e.id === decision.id) ? { ...e, isNew: false } : e));
-                }, 1000);
-                return updated;
-              });
+            // Deduplicate - only process if we haven't seen this decision
+            if (seenIds.current.has(uid)) {
+              return; // Skip duplicate
             }
+            seenIds.current.add(uid);
 
-            // Update stats (increment counts based on decision)
+            // Add to logs
+            setLogs((prev) => {
+              const updated = [{ ...decision, isNew: true }, ...prev].slice(0, 100);
+              setTimeout(() => {
+                setLogs((l) => l.map((e) => (e.id === uid || e.id === decision.id) ? { ...e, isNew: false } : e));
+              }, 1000);
+              return updated;
+            });
+
+            // Update stats (only for non-duplicates)
             setStats((prev) => {
               if (!prev) prev = { total_steps: 0, halt_count: 0, proceed_count: 0, violations_by_type: {} };
               const updated = { ...prev };
@@ -979,7 +1134,7 @@ export default function AgentWatchDashboard() {
               return updated;
             });
 
-            // Update or add agent
+            // Update or add agent (only for non-duplicates)
             setAgents((prev) => {
               const agentId = decision.agent_id;
               const existing = prev.find((a) => a.agent_id === agentId);
@@ -1127,7 +1282,7 @@ export default function AgentWatchDashboard() {
       reason: "MANUAL_OVERRIDE",
       details: "Agent halted via dashboard",
       triggered_by: "dashboard_user",
-      thought: `Manual stop issued for ${agentId} via AgentWatch dashboard.`,
+      thought: `Manual stop issued for ${agentId} via Argus dashboard.`,
       tool_used: "—",
       raw_log: "",
       timestamp: new Date().toISOString(),
@@ -1188,11 +1343,14 @@ export default function AgentWatchDashboard() {
         agent_id: agentId,
         nodes: agentLogs.map((l, i) => ({
           id: l.step_id || `step-${i}`,
+          agent_id: agentId,
           thought: l.thought,
           tool_used: l.tool_used,
           decision: l.decision,
         })),
         edges: [],
+        cross_agent_nodes: [],
+        influences: [],
       });
     }
   }, [selectedAgent, logs]);
