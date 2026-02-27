@@ -1,9 +1,11 @@
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import config
@@ -15,6 +17,16 @@ from neo4j_driver import log_step, check_for_loops, get_agent_graph
 # Webhook Registry — stores callback URLs for agents
 # ---------------------------------------------------------------------------
 _webhook_registry: dict[str, str] = {}  # agent_id -> webhook_url
+
+# ---------------------------------------------------------------------------
+# Manual halt registry — agents halted via dashboard
+# ---------------------------------------------------------------------------
+_halted_agents: set[str] = set()
+
+# ---------------------------------------------------------------------------
+# Recent decisions ring buffer — powers the dashboard live feed
+# ---------------------------------------------------------------------------
+_recent_decisions: deque = deque(maxlen=100)
 
 
 class WebhookConfig(BaseModel):
@@ -123,6 +135,13 @@ async def lifespan(app):
 
 app = FastAPI(title="AgentWatch", version="0.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 @app.get("/health")
 async def health():
@@ -135,6 +154,20 @@ async def receive_telemetry(event: TelemetryEvent):
     # Ensure timestamp is a string for Neo4j/JSON storage
     if isinstance(telemetry.get("timestamp"), datetime):
         telemetry["timestamp"] = telemetry["timestamp"].isoformat()
+
+    # 0. Check manual halt (dashboard circuit breaker)
+    if event.agent_id in _halted_agents:
+        decision = GovernanceDecision(
+            agent_id=event.agent_id,
+            step_id=event.step_id,
+            decision="HALT",
+            reason="MANUAL_OVERRIDE",
+            details="Agent halted via dashboard",
+            triggered_by="dashboard_user",
+            timestamp=datetime.now(timezone.utc),
+        )
+        _push_recent(event, decision, telemetry)
+        return decision
 
     # 1. Pre-log the step so loop detection can see it
     await log_step(telemetry, {"decision": "PENDING", "reason": "", "triggered_by": ""})
@@ -165,6 +198,9 @@ async def receive_telemetry(event: TelemetryEvent):
     if decision.decision == "HALT":
         await _fire_webhook(event.agent_id, decision)
 
+    # 6. Push to live feed buffer
+    _push_recent(event, decision, telemetry)
+
     return decision
 
 
@@ -172,6 +208,49 @@ async def receive_telemetry(event: TelemetryEvent):
 async def get_graph(agent_id: str):
     graph = await get_agent_graph(agent_id)
     return graph
+
+
+def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry: dict):
+    """Push a decision into the live feed ring buffer."""
+    _recent_decisions.appendleft({
+        "id": f"{event.agent_id}-{event.step_id}",
+        "agent_id": event.agent_id,
+        "step_id": event.step_id,
+        "decision": decision.decision,
+        "reason": decision.reason,
+        "details": decision.details,
+        "triggered_by": decision.triggered_by,
+        "thought": telemetry.get("thought", ""),
+        "tool_used": telemetry.get("tool_used", ""),
+        "raw_log": telemetry.get("raw_log", ""),
+        "timestamp": decision.timestamp.isoformat(),
+    })
+
+
+@app.get("/api/v1/recent")
+async def get_recent(limit: int = 50):
+    """Get the most recent governance decisions — powers the dashboard live feed."""
+    return {"decisions": list(_recent_decisions)[:limit]}
+
+
+@app.post("/api/v1/agent/{agent_id}/halt")
+async def halt_agent(agent_id: str):
+    """Manually halt an agent via dashboard. All future telemetry will be rejected."""
+    _halted_agents.add(agent_id)
+    return {"status": "halted", "agent_id": agent_id}
+
+
+@app.post("/api/v1/agent/{agent_id}/resume")
+async def resume_agent(agent_id: str):
+    """Resume a manually halted agent."""
+    _halted_agents.discard(agent_id)
+    return {"status": "resumed", "agent_id": agent_id}
+
+
+@app.get("/api/v1/halted")
+async def list_halted():
+    """List all manually halted agents."""
+    return {"halted_agents": list(_halted_agents)}
 
 
 @app.get("/api/v1/stats")
