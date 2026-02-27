@@ -34,36 +34,36 @@ AgentWatch Trading Policy Document
 """
 
 
-async def _ingest_senso_policies():
-    """Ingest trading policies into Senso Context OS on startup."""
+async def _check_senso_connection():
+    """Verify Senso API is reachable and policies are ingested on startup."""
     if not config.SENSO_API_KEY or not config.SENSO_API_URL:
-        print("[Senso] No API key configured, skipping policy ingestion")
+        print("[Senso] No API key configured, using local policy engine")
         return
 
     headers = {
         "X-API-Key": config.SENSO_API_KEY,
         "Content-Type": "application/json",
     }
-    payload = {
-        "title": "AgentWatch Trading Policies",
-        "summary": "Trading compliance policies for autonomous agent governance",
-        "text": TRADING_POLICIES,
-    }
 
     try:
         async with aiohttp.ClientSession() as session:
+            # Test search with a policy query
             async with session.post(
-                f"{config.SENSO_API_URL}/content/raw",
-                json=payload,
+                config.SENSO_API_URL,
+                json={"query": "What is the maximum trade cost?", "max_results": 1},
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                if resp.status in (200, 201, 202):
+                if resp.status == 200:
                     data = await resp.json()
-                    print(f"[Senso] Policies ingested: {data}")
+                    if data.get("total_results", 0) > 0:
+                        print(f"[Senso] Connected — {data['total_results']} policy chunks indexed")
+                    else:
+                        print("[Senso] Connected but no policies found — ingest policies via /org/ingestion/upload")
+                        print("[Senso] Local policy engine active as fallback")
                 else:
                     text = await resp.text()
-                    print(f"[Senso] Policy ingestion failed ({resp.status}): {text}")
+                    print(f"[Senso] API returned {resp.status}: {text}")
                     print("[Senso] Using local policy engine as fallback")
     except Exception as e:
         print(f"[Senso] Could not connect: {e}")
@@ -72,8 +72,8 @@ async def _ingest_senso_policies():
 
 @asynccontextmanager
 async def lifespan(app):
-    # Startup: ingest policies into Senso
-    await _ingest_senso_policies()
+    # Startup: verify Senso connection and policy availability
+    await _check_senso_connection()
     yield
 
 

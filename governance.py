@@ -148,21 +148,26 @@ async def extract_entities(raw_log: str) -> dict:
 # ---------------------------------------------------------------------------
 async def _senso_policy_check(entities: dict, agent_id: str) -> dict:
     """Queries Senso's search API to check entities against ingested policies."""
-    # Build a natural language compliance query from the extracted entities
-    parts = []
-    if entities.get("action_type"):
-        parts.append(f"action: {entities['action_type']}")
-    if entities.get("ticker"):
-        parts.append(f"ticker: {entities['ticker']}")
-    if entities.get("price"):
-        parts.append(f"cost: ${entities['price']:,.0f}")
-    if entities.get("quantity"):
-        parts.append(f"quantity: {entities['quantity']} shares")
-
-    if not parts:
+    # Only query Senso when there's a real trade with concrete data
+    action = entities.get("action_type", "")
+    is_trade_action = action in ("BUY", "SELL")
+    has_price = entities.get("price") is not None
+    has_quantity = entities.get("quantity") is not None
+    has_ticker = entities.get("ticker") is not None
+    # Require a trade action AND at least one concrete data point (price, quantity, or ticker)
+    if not (is_trade_action and (has_price or has_quantity or has_ticker)):
         return {"compliant": True, "violation": None, "policy_limit": None}
 
-    query = f"Is this trade compliant with our policies? {', '.join(parts)}"
+    # Build a focused compliance query
+    parts = []
+    if entities.get("ticker"):
+        parts.append(f"ticker {entities['ticker']}")
+    if entities.get("price"):
+        parts.append(f"total cost ${entities['price']:,.0f}")
+    if entities.get("quantity"):
+        parts.append(f"{entities['quantity']} shares")
+
+    query = f"Is this trade allowed? {', '.join(parts)}. Check budget limits, restricted tickers, and position size only."
 
     headers = {
         "X-API-Key": config.SENSO_API_KEY,
@@ -172,22 +177,26 @@ async def _senso_policy_check(entities: dict, agent_id: str) -> dict:
 
     async with aiohttp.ClientSession() as session:
         async with session.post(
-            f"{config.SENSO_API_URL}/search",
+            config.SENSO_API_URL,
             json=payload,
             headers=headers,
-            timeout=aiohttp.ClientTimeout(total=10),
+            timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             resp.raise_for_status()
             data = await resp.json()
 
     answer = data.get("answer", "").lower()
-    # Parse Senso's response for compliance signals
-    violation_signals = ["exceeds", "violation", "not compliant", "restricted", "prohibited", "denied", "over budget"]
+    # Parse Senso's AI-generated answer for compliance signals
+    violation_signals = [
+        "not allowed", "halted", "halt", "exceeds", "violation", "not compliant",
+        "restricted", "prohibited", "denied", "over budget", "not permitted",
+        "may not", "must be halted",
+    ]
     for signal in violation_signals:
         if signal in answer:
             return {
                 "compliant": False,
-                "violation": f"Senso policy check: {data.get('answer', 'policy violation detected')}",
+                "violation": data.get("answer", "policy violation detected"),
                 "policy_limit": None,
             }
 
