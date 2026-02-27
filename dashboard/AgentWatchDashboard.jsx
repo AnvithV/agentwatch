@@ -849,14 +849,14 @@ export default function AgentWatchDashboard() {
         setConnected(true);
         setStats(statsData);
 
-        // Update agents from backend
+        // Update agents from backend (always update, even if empty after reset)
         const backendAgents = (agentsData.agents || []).map((a) => ({
           ...a,
           name: AGENT_NAMES[a.agent_id] || a.agent_id,
           status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
           lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
         }));
-        if (backendAgents.length > 0) setAgents(backendAgents);
+        setAgents(backendAgents);
 
         // Find genuinely new entries
         const newEntries = (recentData.decisions || [])
@@ -921,7 +921,7 @@ export default function AgentWatchDashboard() {
                 return updated;
               });
 
-              // Refresh stats
+              // Refresh stats and agents
               apiFetch("/stats").then(setStats).catch(() => {});
               apiFetch("/agents").then((data) => {
                 const backendAgents = (data.agents || []).map((a) => ({
@@ -930,7 +930,7 @@ export default function AgentWatchDashboard() {
                   status: localHalted.current.has(a.agent_id) ? "HALTED" : (a.halt_count > 2 ? "WARNING" : "RUNNING"),
                   lastDecision: a.halt_count > 0 ? "HALT" : "PROCEED",
                 }));
-                if (backendAgents.length > 0) setAgents(backendAgents);
+                setAgents(backendAgents); // Always update, even if empty
               }).catch(() => {});
             }
           } else if (msg.type === "policy_update") {
@@ -941,6 +941,17 @@ export default function AgentWatchDashboard() {
             if (msg.data.status === "resumed") {
               localHalted.current.delete(msg.data.agent_id);
             }
+          } else if (msg.type === "reset") {
+            // Clear everything for fresh start
+            setAgents([]);
+            setLogs([]);
+            setStats({ total_steps: 0, halt_count: 0, proceed_count: 0, violations_by_type: {} });
+            setSelectedAgent(null);
+            setAgentGraph(null);
+            setHaltedAgents(new Set());
+            localHalted.current.clear();
+            seenIds.current.clear();
+            console.log("[WebSocket] Reset received - dashboard cleared");
           }
         } catch (err) {
           console.error("[WebSocket] Parse error:", err);

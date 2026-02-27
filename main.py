@@ -627,5 +627,11 @@ async def reset_all_data():
     # Clear neo4j fallback store AND Neo4j database
     await clear_all_data()
 
+    # Broadcast reset to all connected dashboards
+    await ws_manager.broadcast({
+        "type": "reset",
+        "data": {"message": "All data cleared"}
+    })
+
     print("[Reset] All data cleared")
     return {"status": "reset", "message": "All data cleared. Ready for fresh demo."}
