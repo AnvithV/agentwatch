@@ -375,10 +375,9 @@ class Neo4jDriver:
             for i in range(len(final_steps) - 1)
         ]
 
-        # Find cross-agent INFLUENCES edges involving this agent
+        # Find cross-agent INFLUENCES edges - include FULL CHAIN (transitive)
         cross_agent_nodes = []
         influences = []
-        my_step_ids = {s["step_id"] for s in final_steps}
 
         # Build lookup of all steps across all agents
         all_steps_map = {}
@@ -387,9 +386,24 @@ class Neo4jDriver:
                 if s["decision"] != "PENDING":
                     all_steps_map[s["step_id"]] = {**s, "agent_id": aid}
 
+        # Find all agents in the same chain as this agent (transitive closure)
+        connected_agents = {agent_id}
+        changed = True
+        while changed:
+            changed = False
+            for inf in _fallback_influences:
+                if inf["source_agent_id"] in connected_agents or inf["target_agent_id"] in connected_agents:
+                    if inf["source_agent_id"] not in connected_agents:
+                        connected_agents.add(inf["source_agent_id"])
+                        changed = True
+                    if inf["target_agent_id"] not in connected_agents:
+                        connected_agents.add(inf["target_agent_id"])
+                        changed = True
+
+        # Include ALL influences between connected agents (full chain)
+        seen_nodes = set()
         for inf in _fallback_influences:
-            # Check if this agent is source or target of the INFLUENCES edge
-            if inf["source_agent_id"] == agent_id or inf["target_agent_id"] == agent_id:
+            if inf["source_agent_id"] in connected_agents and inf["target_agent_id"] in connected_agents:
                 influences.append({
                     "source": inf["source_step_id"],
                     "target": inf["target_step_id"],
@@ -397,21 +411,22 @@ class Neo4jDriver:
                     "target_agent": inf["target_agent_id"],
                     "type": "INFLUENCES"
                 })
-                # Add the external node
-                external_step_id = inf["source_step_id"] if inf["target_agent_id"] == agent_id else inf["target_step_id"]
-                external_agent_id = inf["source_agent_id"] if inf["target_agent_id"] == agent_id else inf["target_agent_id"]
-                if external_step_id in all_steps_map:
-                    ext_step = all_steps_map[external_step_id]
-                    cross_agent_nodes.append({
-                        "id": ext_step["step_id"],
-                        "agent_id": external_agent_id,
-                        "thought": ext_step["thought"],
-                        "tool_used": ext_step["tool_used"],
-                        "decision": ext_step["decision"],
-                        "reason": ext_step.get("reason", ""),
-                        "timestamp": ext_step["timestamp"],
-                        "is_external": True
-                    })
+                # Add external nodes (not from the selected agent)
+                for step_id, ext_agent_id in [(inf["source_step_id"], inf["source_agent_id"]),
+                                               (inf["target_step_id"], inf["target_agent_id"])]:
+                    if ext_agent_id != agent_id and step_id not in seen_nodes and step_id in all_steps_map:
+                        seen_nodes.add(step_id)
+                        ext_step = all_steps_map[step_id]
+                        cross_agent_nodes.append({
+                            "id": ext_step["step_id"],
+                            "agent_id": ext_agent_id,
+                            "thought": ext_step["thought"],
+                            "tool_used": ext_step["tool_used"],
+                            "decision": ext_step["decision"],
+                            "reason": ext_step.get("reason", ""),
+                            "timestamp": ext_step["timestamp"],
+                            "is_external": True
+                        })
 
         return {
             "agent_id": agent_id,

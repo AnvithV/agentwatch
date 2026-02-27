@@ -382,44 +382,84 @@ function ReasoningGraph({ agentGraph, selectedAgent }) {
   const influences = agentGraph.influences || [];
   const hasCrossAgent = crossAgentNodes.length > 0 || influences.length > 0;
 
-  // Build position map for all nodes
-  // Main agent nodes on left, external agent nodes on right
-  const mainNodes = agentGraph.nodes.slice(0, 8);
-  const externalNodes = crossAgentNodes.slice(0, 4);
+  // For cross-agent chains, build a chain-ordered layout
+  // Group nodes by agent and determine chain order
+  const mainNodes = agentGraph.nodes.slice(0, 6);
+  const externalNodes = crossAgentNodes;
 
-  // Position main agent nodes vertically on the left
-  const graphNodes = mainNodes.map((node, i) => ({
-    id: node.id,
-    agent_id: node.agent_id || selectedAgent,
-    x: hasCrossAgent ? 90 : 140,
-    y: 35 + i * 50,
-    decision: node.decision,
-    thought: node.thought,
-    tool: node.tool_used,
-    stepNum: i + 1,
-    isExternal: false,
-  }));
+  // Build chain order from influences (who influences whom)
+  const agentOrder = [];
+  const agentSteps = {};
 
-  // Position external agent nodes on the right
-  const externalGraphNodes = externalNodes.map((node, i) => ({
-    id: node.id,
-    agent_id: node.agent_id,
-    x: 210,
-    y: 60 + i * 70,
-    decision: node.decision,
-    thought: node.thought,
-    tool: node.tool_used,
-    stepNum: `E${i + 1}`,
-    isExternal: true,
-  }));
+  // Collect all agents and their steps
+  agentSteps[selectedAgent] = mainNodes;
+  externalNodes.forEach((n) => {
+    if (!agentSteps[n.agent_id]) agentSteps[n.agent_id] = [];
+    agentSteps[n.agent_id].push(n);
+  });
 
-  // Combine all nodes for lookup
-  const allGraphNodes = [...graphNodes, ...externalGraphNodes];
+  // Determine chain order based on influences
+  if (hasCrossAgent && influences.length > 0) {
+    const upstream = new Set();
+    const downstream = new Set();
+
+    influences.forEach((inf) => {
+      if (inf.target_agent === selectedAgent) {
+        upstream.add(inf.source_agent);
+      } else if (inf.source_agent === selectedAgent) {
+        downstream.add(inf.target_agent);
+      } else {
+        // Transitive: check if source is upstream of someone upstream
+        if ([...upstream].some(u => inf.target_agent === u)) {
+          upstream.add(inf.source_agent);
+        }
+        if ([...downstream].some(d => inf.source_agent === d)) {
+          downstream.add(inf.target_agent);
+        }
+      }
+    });
+
+    // Order: upstream agents first, then selected, then downstream
+    [...upstream].forEach((a) => agentOrder.push(a));
+    agentOrder.push(selectedAgent);
+    [...downstream].forEach((a) => agentOrder.push(a));
+  } else {
+    agentOrder.push(selectedAgent);
+  }
+
+  // Position nodes in chain layout (diagonal flow)
+  const allGraphNodes = [];
+  const chainSpacing = 75;
+  const nodeSpacing = 45;
+
+  agentOrder.forEach((agentId, chainIdx) => {
+    const steps = agentSteps[agentId] || [];
+    const isMain = agentId === selectedAgent;
+    const xBase = 50 + chainIdx * chainSpacing;
+
+    steps.slice(0, 3).forEach((node, stepIdx) => {
+      allGraphNodes.push({
+        id: node.id,
+        agent_id: agentId,
+        x: xBase,
+        y: 40 + chainIdx * 30 + stepIdx * nodeSpacing,
+        decision: node.decision,
+        thought: node.thought,
+        tool: node.tool_used,
+        stepNum: isMain ? stepIdx + 1 : agentId.split("-")[0].slice(0, 3).toUpperCase(),
+        isExternal: !isMain,
+        isMain: isMain,
+      });
+    });
+  });
+
+  // Build lookup
   const nodeById = Object.fromEntries(allGraphNodes.map((n) => [n.id, n]));
+  const mainAgentNodes = allGraphNodes.filter((n) => n.isMain);
 
-  // Create NEXT edges (internal flow)
-  const nextEdges = graphNodes.slice(1).map((node, i) => ({
-    from: graphNodes[i],
+  // Create NEXT edges (internal flow for main agent)
+  const nextEdges = mainAgentNodes.slice(1).map((node, i) => ({
+    from: mainAgentNodes[i],
     to: node,
     type: "NEXT",
   }));
@@ -438,7 +478,10 @@ function ReasoningGraph({ agentGraph, selectedAgent }) {
 
   const allEdges = [...nextEdges, ...influenceEdges];
 
-  const viewHeight = Math.max(320, Math.max(graphNodes.length, externalGraphNodes.length) * 60 + 60);
+  const maxY = Math.max(...allGraphNodes.map((n) => n.y), 100);
+  const maxX = Math.max(...allGraphNodes.map((n) => n.x), 200);
+  const viewHeight = Math.max(280, maxY + 80);
+  const viewWidth = Math.max(280, maxX + 80);
 
   return (
     <div className="relative">
@@ -447,7 +490,7 @@ function ReasoningGraph({ agentGraph, selectedAgent }) {
           cross-agent
         </div>
       )}
-      <svg width="100%" viewBox={`0 0 280 ${viewHeight}`} className="overflow-visible">
+      <svg width="100%" viewBox={`0 0 ${viewWidth} ${viewHeight}`} className="overflow-visible">
         <defs>
           <marker id="arrowhead" markerWidth="6" markerHeight="4" refX="5" refY="2" orient="auto">
             <polygon points="0 0, 6 2, 0 4" fill="#06b6d4" />
