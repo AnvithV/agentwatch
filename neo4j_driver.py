@@ -14,15 +14,17 @@ from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 # In-memory fallback store (used when Neo4j is unavailable)
 # ---------------------------------------------------------------------------
 _fallback_steps: dict[str, list[dict]] = defaultdict(list)
+_fallback_influences: list[dict] = []  # Cross-agent INFLUENCES edges
 _neo4j_available: bool = True
 
 
 async def clear_all_data():
     """Clear all data - both in-memory fallback and Neo4j."""
-    global _fallback_steps, _driver
+    global _fallback_steps, _fallback_influences, _driver
 
     # Clear in-memory fallback
     _fallback_steps.clear()
+    _fallback_influences.clear()
     print("[Neo4j] Cleared in-memory fallback data")
 
     # Clear Neo4j if connected
@@ -93,7 +95,10 @@ class Neo4jDriver:
             "decision": decision.get("decision", ""),
             "reason": decision.get("reason", ""),
             "details": decision.get("details", ""),
-            "triggered_by": decision.get("triggered_by", "")
+            "triggered_by": decision.get("triggered_by", ""),
+            # Cross-agent causal chain
+            "parent_step_id": telemetry.get("parent_step_id"),
+            "parent_agent_id": telemetry.get("parent_agent_id"),
         }
 
         # Try Neo4j first
@@ -136,6 +141,19 @@ class Neo4jDriver:
         agent_id = telemetry.get("agent_id")
         _fallback_steps[agent_id].append(step_data)
         print(f"[Fallback] Logged step: {step_data['step_id']}")
+
+        # Create INFLUENCES edge if this step references a parent from another agent
+        parent_step_id = telemetry.get("parent_step_id")
+        parent_agent_id = telemetry.get("parent_agent_id")
+        if parent_step_id and parent_agent_id and parent_agent_id != agent_id:
+            _fallback_influences.append({
+                "source_agent_id": parent_agent_id,
+                "source_step_id": parent_step_id,
+                "target_agent_id": agent_id,
+                "target_step_id": step_data["step_id"],
+                "type": "INFLUENCES"
+            })
+            print(f"[Fallback] Created INFLUENCES edge: {parent_agent_id} → {agent_id}")
 
     async def check_for_loops(self, agent_id: str, tool_used: str, input_parameters: dict) -> bool:
         """
@@ -394,6 +412,79 @@ class Neo4jDriver:
             })
         return {"agents": agents, "count": len(agents)}
 
+    async def get_cross_agent_graph(self) -> dict:
+        """
+        Return full multi-agent graph with INFLUENCES edges.
+        Shows causal chains across agents.
+        """
+        # Try Neo4j first
+        if self.driver and _neo4j_available:
+            try:
+                async with self.driver.session() as session:
+                    query = """
+                    MATCH (a:Agent)-[:HAS_STEP]->(s:AgentStep)
+                    OPTIONAL MATCH (s)-[:INFLUENCES]->(target:AgentStep)<-[:HAS_STEP]-(targetAgent:Agent)
+                    WITH a, s, target, targetAgent
+                    ORDER BY s.timestamp
+                    RETURN
+                        a.agent_id AS agent_id,
+                        collect(DISTINCT {
+                            id: s.step_id,
+                            agent_id: a.agent_id,
+                            thought: s.thought,
+                            tool_used: s.tool_used,
+                            decision: s.decision,
+                            reason: s.reason,
+                            details: s.details,
+                            timestamp: toString(s.timestamp)
+                        }) AS nodes,
+                        collect(DISTINCT CASE WHEN target IS NOT NULL THEN {
+                            source: s.step_id,
+                            source_agent: a.agent_id,
+                            target: target.step_id,
+                            target_agent: targetAgent.agent_id,
+                            type: "INFLUENCES"
+                        } ELSE NULL END) AS influences
+                    """
+                    result = await session.run(query)
+                    records = await result.data()
+
+                    all_nodes = []
+                    all_edges = []
+                    for r in records:
+                        all_nodes.extend(r["nodes"])
+                        all_edges.extend([e for e in r["influences"] if e is not None])
+
+                    return {
+                        "nodes": all_nodes,
+                        "edges": all_edges,
+                        "agent_count": len(records)
+                    }
+            except Exception as e:
+                print(f"[Neo4j] Cross-agent graph query failed, using fallback: {e}")
+
+        # Fallback to in-memory
+        all_nodes = []
+        for agent_id, steps in _fallback_steps.items():
+            for s in steps:
+                if s["decision"] in ["PROCEED", "HALT"]:
+                    all_nodes.append({
+                        "id": s["step_id"],
+                        "agent_id": agent_id,
+                        "thought": s["thought"],
+                        "tool_used": s["tool_used"],
+                        "decision": s["decision"],
+                        "reason": s["reason"],
+                        "details": s.get("details", ""),
+                        "timestamp": s["timestamp"]
+                    })
+
+        return {
+            "nodes": all_nodes,
+            "edges": _fallback_influences.copy(),
+            "agent_count": len(_fallback_steps)
+        }
+
 
 # ---------------------------------------------------------------------------
 # Singleton + convenience functions
@@ -444,3 +535,9 @@ async def get_halted_steps(agent_id: str) -> list:
     """Returns all HALT steps for an agent."""
     driver = await get_driver()
     return await driver.get_halted_steps(agent_id)
+
+
+async def get_cross_agent_graph() -> dict:
+    """Returns full multi-agent graph with INFLUENCES edges."""
+    driver = await get_driver()
+    return await driver.get_cross_agent_graph()

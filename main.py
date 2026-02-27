@@ -247,6 +247,17 @@ async def get_graph(agent_id: str):
     return graph
 
 
+@app.get("/api/v1/graph/cross-agent")
+async def get_cross_agent_graph_endpoint():
+    """
+    Get full multi-agent graph with INFLUENCES edges.
+    Shows causal chains: ResearchAgent → INFLUENCES → TradeAgent → INFLUENCES → RiskAgent
+    """
+    from neo4j_driver import get_cross_agent_graph
+    graph = await get_cross_agent_graph()
+    return graph
+
+
 async def _push_recent(event: TelemetryEvent, decision: GovernanceDecision, telemetry: dict):
     """Push a decision into the live feed ring buffer and broadcast via WebSocket."""
     decision_data = {

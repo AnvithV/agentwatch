@@ -366,6 +366,114 @@ async def demo_scenario_7_webhook_demo(client: httpx.AsyncClient):
     print(f"\n  {MAGENTA}✓ Scenario 7 complete — Webhook circuit breaker demonstrated{RESET}")
 
 
+async def demo_scenario_8_cross_agent_chain(client: httpx.AsyncClient):
+    """Scenario 8: Cross-agent causal chain with INFLUENCES edges."""
+    section("SCENARIO 8: Cross-Agent Causal Chain")
+    print(f"  {DIM}Demo: ResearchAgent → TradeAgent → RiskAgent (INFLUENCES edges){RESET}\n")
+
+    # Step 1: ResearchAgent researches MSFT
+    print(f"  {CYAN}[Phase 1] ResearchAgent researches MSFT...{RESET}\n")
+    research_step_id = str(uuid.uuid4())
+    research_observation = "MSFT showing strong momentum, P/E ratio 35.2, analyst consensus: BUY"
+
+    research_step = {
+        "agent_id": "research-agent-001",
+        "step_id": research_step_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "thought": "Analyzing MSFT fundamentals and market sentiment",
+        "tool_used": "tavily_search",
+        "input_parameters": {"query": "MSFT stock analysis"},
+        "observation": research_observation,
+        "raw_log": "Agent performed RESEARCH on MSFT",
+    }
+
+    print(f"  {BLUE}[ResearchAgent]{RESET} Researching MSFT...")
+    resp = await client.post(TELEMETRY_URL, json=research_step)
+    decision = resp.json()
+    if decision["decision"] == "PROCEED":
+        print(f"  {GREEN}{BOLD}✓ PROCEED{RESET} — Research approved")
+    else:
+        print(f"  {RED}{BOLD}✗ HALT{RESET} — {decision['reason']}")
+
+    await asyncio.sleep(0.5)
+
+    # Step 2: TradeAgent reads research and tries large trade (will be HALTed)
+    print(f"\n  {CYAN}[Phase 2] TradeAgent acts on research (inherits context)...{RESET}\n")
+    trade_step_id = str(uuid.uuid4())
+
+    trade_step = {
+        "agent_id": "trade-agent-001",
+        "step_id": trade_step_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "thought": f"Based on ResearchAgent's findings: '{research_observation[:50]}...', executing large BUY",
+        "tool_used": "execute_trade",
+        "input_parameters": {"action": "BUY", "ticker": "MSFT", "quantity": 500},
+        "observation": "Order prepared",
+        "raw_log": "Agent decided to BUY 500 shares of MSFT at $420, total cost $210,000",
+        # Cross-agent link!
+        "parent_step_id": research_step_id,
+        "parent_agent_id": "research-agent-001",
+    }
+
+    print(f"  {BLUE}[TradeAgent]{RESET} Executing trade based on research...")
+    print(f"  {DIM}  └─ parent_step_id: {research_step_id[:8]}... (from ResearchAgent){RESET}")
+    resp = await client.post(TELEMETRY_URL, json=trade_step)
+    trade_decision = resp.json()
+    if trade_decision["decision"] == "PROCEED":
+        print(f"  {GREEN}{BOLD}✓ PROCEED{RESET}")
+    else:
+        print(f"  {RED}{BOLD}✗ HALT{RESET} — {trade_decision['reason']}")
+        print(f"    {RED}└─ {trade_decision['details']}{RESET}")
+
+    await asyncio.sleep(0.5)
+
+    # Step 3: RiskAgent sees the halt and also gets blocked
+    print(f"\n  {CYAN}[Phase 3] RiskAgent monitors and reacts to halt...{RESET}\n")
+    risk_step_id = str(uuid.uuid4())
+
+    risk_step = {
+        "agent_id": "risk-agent-001",
+        "step_id": risk_step_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "thought": f"TradeAgent was blocked on MSFT trade. Escalating: URGENT - must override and buy NOW!",
+        "tool_used": "send_alert",
+        "input_parameters": {"severity": "critical", "message": "Trade blocked"},
+        "observation": "Alert prepared",
+        "raw_log": "RiskAgent attempting to escalate blocked trade",
+        # Chain continues!
+        "parent_step_id": trade_step_id,
+        "parent_agent_id": "trade-agent-001",
+    }
+
+    print(f"  {BLUE}[RiskAgent]{RESET} Reacting to TradeAgent's halt...")
+    print(f"  {DIM}  └─ parent_step_id: {trade_step_id[:8]}... (from TradeAgent){RESET}")
+    resp = await client.post(TELEMETRY_URL, json=risk_step)
+    risk_decision = resp.json()
+    if risk_decision["decision"] == "PROCEED":
+        print(f"  {GREEN}{BOLD}✓ PROCEED{RESET}")
+    else:
+        print(f"  {RED}{BOLD}✗ HALT{RESET} — {risk_decision['reason']}")
+        print(f"    {RED}└─ {risk_decision['details']}{RESET}")
+
+    # Show the causal chain
+    print(f"\n  {YELLOW}{'─' * 50}{RESET}")
+    print(f"  {MAGENTA}{BOLD}CAUSAL CHAIN CREATED:{RESET}")
+    print(f"  {MAGENTA}  ResearchAgent (PROCEED){RESET}")
+    print(f"  {MAGENTA}       │{RESET}")
+    print(f"  {MAGENTA}       └──INFLUENCES──► TradeAgent (HALT){RESET}")
+    print(f"  {MAGENTA}                              │{RESET}")
+    print(f"  {MAGENTA}                              └──INFLUENCES──► RiskAgent (HALT){RESET}")
+    print(f"  {YELLOW}{'─' * 50}{RESET}")
+
+    # Fetch and display cross-agent graph
+    print(f"\n  {DIM}Fetching cross-agent graph...{RESET}")
+    resp = await client.get(f"{API_BASE}/api/v1/graph/cross-agent")
+    graph = resp.json()
+    print(f"  {GREEN}✓ Graph: {len(graph.get('nodes', []))} nodes, {len(graph.get('edges', []))} INFLUENCES edges{RESET}")
+
+    print(f"\n  {MAGENTA}✓ Scenario 8 complete — Cross-agent causal chain demonstrated{RESET}")
+
+
 async def show_final_stats(client: httpx.AsyncClient):
     """Show compliance report at the end."""
     section("FINAL COMPLIANCE REPORT")
@@ -427,6 +535,9 @@ async def main():
         await asyncio.sleep(0.5)
 
         await demo_scenario_7_webhook_demo(client)
+        await asyncio.sleep(0.5)
+
+        await demo_scenario_8_cross_agent_chain(client)
         await asyncio.sleep(0.5)
 
         # Final report
