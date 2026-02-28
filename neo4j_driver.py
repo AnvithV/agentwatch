@@ -215,7 +215,7 @@ class Neo4jDriver:
                     result = await session.run(query, params)
                     record = await result.single()
                     repeat_count = record["repeat_count"] if record else 0
-                    is_loop = repeat_count >= 3
+                    is_loop = repeat_count >= 2
                     if is_loop:
                         print(f"[Neo4j] LOOP DETECTED: {agent_id} repeated {tool_used} {repeat_count}x")
                     return is_loop
@@ -229,7 +229,7 @@ class Neo4jDriver:
             1 for s in recent
             if s["tool_used"] == tool_used and s["input_parameters"] == input_params_json
         )
-        is_loop = repeat_count >= 3
+        is_loop = repeat_count >= 2
         if is_loop:
             print(f"[Fallback] LOOP DETECTED: {agent_id} repeated {tool_used} {repeat_count}x")
         return is_loop
@@ -262,6 +262,7 @@ class Neo4jDriver:
                             observation: s.observation,
                             decision: s.decision,
                             reason: s.reason,
+                            details: s.details,
                             timestamp: toString(s.timestamp)
                         }) AS nodes,
                         collect(DISTINCT CASE WHEN next IS NOT NULL THEN {
@@ -295,6 +296,7 @@ class Neo4jDriver:
                             tool_used: parent.tool_used,
                             decision: parent.decision,
                             reason: parent.reason,
+                            details: parent.details,
                             timestamp: toString(parent.timestamp),
                             is_external: true
                         } ELSE NULL END) AS incoming_nodes,
@@ -305,6 +307,7 @@ class Neo4jDriver:
                             tool_used: child.tool_used,
                             decision: child.decision,
                             reason: child.reason,
+                            details: child.details,
                             timestamp: toString(child.timestamp),
                             is_external: true
                         } ELSE NULL END) AS outgoing_nodes,

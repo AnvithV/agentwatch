@@ -891,12 +891,12 @@ function RightPanel({ logs, stats, agentGraph, selectedAgent, policies, onUpdate
                             <span className="text-base">{meta.icon}</span>
                             <span className={`text-xs font-medium ${meta.color}`}>{meta.label}</span>
                           </div>
-                          <p className="text-slate-300 text-xs font-mono leading-relaxed mb-1.5">
-                            {node.thought?.slice(0, 80)}{node.thought?.length > 80 ? "..." : ""}
+                          <p className={`text-xs font-mono leading-relaxed mb-1 ${meta.color}`}>
+                            {node.details || node.reason || "Policy violation"}
                           </p>
-                          {node.details && (
+                          {node.thought && (
                             <p className="text-slate-500 text-xs font-mono">
-                              → {node.details}
+                              Agent: {node.thought?.slice(0, 60)}{node.thought?.length > 60 ? "..." : ""}
                             </p>
                           )}
                         </div>
